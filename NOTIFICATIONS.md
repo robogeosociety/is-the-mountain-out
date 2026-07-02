@@ -2,6 +2,11 @@
 
 The project uses a **Discord webhook** for real-time push notifications. Discord delivers to desktop and mobile (iOS/Android) via the Discord app, with no per-IP rate limit on incoming webhooks — which is why it replaced the old ntfy.sh path (anonymous ntfy publishing returned HTTP 429 from Cloudflare's shared egress IPs).
 
+> Not to be confused with the **reaction-labeling bot** (`BOT.md`): the webhook
+> below is the Worker's one-way "the mountain is out!" push; the bot is a
+> separate Gateway app that posts hourly captures and turns your reactions into
+> training labels. They can share a channel — each ignores the other's messages.
+
 ## Subscribe
 
 1. In the Discord server/channel you want the alerts in: **Channel → Edit → Integrations → Webhooks → New Webhook**.

@@ -18,6 +18,11 @@ the mountain-specific instance.
    # → uv run training batch --labels data/labels.yaml --epochs 5
    ```
 
+   Labels arrive from two surfaces that share one `labels.yaml` (union-merged,
+   R2 as source of truth): the bulk classifier UI (`uv run classify start`) and
+   the Discord reaction-labeling bot (👍/⛅/👎 on hourly webcam posts — see
+   `BOT.md`). A batch run picks both up with no extra flags.
+
    (the `training` console script → `train.scheduler:app`.)
 
 2. **Training runs locally on the most capable machine, *not* under Nomad.** It

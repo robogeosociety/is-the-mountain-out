@@ -41,9 +41,10 @@ training = "train.scheduler:app"
 train-tray = "train.tray:cli"
 collect = "collect.collector:cli"
 classify = "collect.classifier:cli_wrapper"
+bot = "bot.main:cli"
 
 [tool.setuptools]
-packages = ["train", "collect"]
+packages = ["train", "collect", "bot"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
@@ -54,6 +55,12 @@ dev = [
     "scikit-learn>=1.6.1",
     "tabulate>=0.9.0",
     "tomli-w>=1.2.0",
+]
+# Discord reaction-labeling bot (BOT.md). A named group — not a main dependency —
+# so the inference container's `uv sync --no-dev` never installs it.
+# Run with:  uv run --group bot bot run
+bot = [
+    "discord-py>=2.6",
 ]
 
 # Inference runs on CPU (Cloudflare Containers; no GPU). On Linux pull the

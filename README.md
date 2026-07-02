@@ -14,6 +14,7 @@ Append `?debug` to see confidence bars and the raw METAR readout.
 flowchart LR
   subgraph local["Mac mini (local)"]
     collector["collect collector<br/>(Nomad, on-demand)"]
+    labeler["bot labeler<br/>(Nomad, hourly daylight)"]
     trainer["training batch<br/>(MPS, on-demand)"]
   end
 
@@ -28,6 +29,11 @@ flowchart LR
   webcam(["UW ATG webcam"]) --> collector
   metar(["NOAA METAR (KSEA)"]) --> collector
   collector -- "captures + metar" --> r2priv
+
+  webcam --> labeler
+  metar --> labeler
+  labeler -- "captures + 👍⛅👎 labels" --> r2priv
+  labeler <-- "posts / reactions" --> discord(["Discord channel"])
 
   r2priv -- "labels + cached images" --> trainer
   trainer -- "checkpoint" --> r2priv
@@ -127,8 +133,9 @@ Targets the model is trying to meet before announcing "out" with confidence:
 ## Repository layout
 
 ```
-mountain.toml         configuration (mountain, webcam, METAR, training, R2 storage)
+mountain.toml         configuration (mountain, webcam, METAR, training, R2 storage, bot)
 collect/              capture collector (Nomad job), R2 storage backend, classifier server
+bot/                  Discord reaction-labeling bot (see BOT.md)
 train/                model definition, scheduler, config loader, checkpoints
 tools/                labeling backend, evaluation/pruning/ab-test scripts, predict_state
 inference/            FastAPI server + Dockerfile for the Cloudflare Container
@@ -157,6 +164,10 @@ uv run training once          # single capture + train cycle, then exit
 uv run classify start [data_folder]
 uv run classify stop
 
+# Discord reaction-labeling bot (see BOT.md; needs cf.env)
+uv run --group bot bot run          # hourly daylight posts + reaction labeling
+uv run --group bot bot post-once    # post one labelable capture, then exit
+
 # Inference (server-side, used by the Cloudflare Container)
 uv run python tools/predict_state.py --config mountain.toml
 
@@ -180,6 +191,7 @@ R2 S3 credentials (`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) live in `cf.env` 
 | Component | Host | Trigger |
 |---|---|---|
 | Capture collector | Mac mini (Nomad) | Cron, on-demand |
+| Discord labeling bot | Mac mini (Nomad) | Always-on (posts hourly in daylight) |
 | Training | Mac mini (MPS) | On-demand (`uv run training batch`) |
 | Inference cron | Cloudflare Worker | `*/15 * * * *` |
 | Inference compute | Cloudflare Container | Worker invocation |

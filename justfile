@@ -10,3 +10,11 @@ default:
 #   just train data/labels.yaml 5
 train labels="data/labels.yaml" epochs="5":
     uv run training batch --labels {{labels}} --epochs {{epochs}}
+
+# Run the Discord reaction-labeling bot (needs cf.env — see BOT.md)
+bot:
+    uv run --group bot bot run --config mountain.toml
+
+# Post a single labelable capture to Discord, then exit (setup check)
+bot-post-once:
+    uv run --group bot bot post-once --config mountain.toml
