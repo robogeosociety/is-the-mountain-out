@@ -6,7 +6,6 @@ Provides a Protocol-based abstraction with three implementations:
 - CachedR2Storage: R2 with batched local disk cache for training
 """
 
-import io
 import logging
 import os
 import shutil
@@ -57,9 +56,7 @@ class LocalStorage:
         if not base.exists():
             return []
         return sorted(
-            str(p.relative_to(self.root))
-            for p in base.rglob("*")
-            if p.is_file()
+            str(p.relative_to(self.root)) for p in base.rglob("*") if p.is_file()
         )
 
     def exists(self, key: str) -> bool:
@@ -91,7 +88,8 @@ class R2Storage:
             "s3",
             endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
             aws_access_key_id=access_key_id or os.environ["R2_ACCESS_KEY_ID"],
-            aws_secret_access_key=secret_access_key or os.environ["R2_SECRET_ACCESS_KEY"],
+            aws_secret_access_key=secret_access_key
+            or os.environ["R2_SECRET_ACCESS_KEY"],
             config=BotoConfig(
                 retries={"max_attempts": 3, "mode": "adaptive"},
                 signature_version="s3v4",
@@ -203,7 +201,9 @@ class CachedR2Storage:
         if not to_fetch:
             logger.info("Cache is warm — nothing to prefetch.")
             return
-        logger.info(f"Prefetching {len(to_fetch)} files from R2 ({len(keys) - len(to_fetch)} already cached)...")
+        logger.info(
+            f"Prefetching {len(to_fetch)} files from R2 ({len(keys) - len(to_fetch)} already cached)..."
+        )
 
         def _download(key: str) -> str | None:
             try:
@@ -224,7 +224,10 @@ class CachedR2Storage:
                     errors.append(err)
 
         if errors:
-            logger.warning(f"Prefetch completed with {len(errors)} errors:\n  " + "\n  ".join(errors[:10]))
+            logger.warning(
+                f"Prefetch completed with {len(errors)} errors:\n  "
+                + "\n  ".join(errors[:10])
+            )
         else:
             logger.info(f"Prefetch complete: {len(to_fetch)} files downloaded.")
 

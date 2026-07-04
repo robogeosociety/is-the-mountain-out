@@ -1,10 +1,7 @@
 import click
 import time
-import os
-import subprocess
 import json
 import requests
-import signal
 import threading
 from pathlib import Path
 from datetime import datetime, UTC
@@ -18,12 +15,14 @@ import rumps
 # Assuming 'train' and 'collect' are in the python path.
 from train.config_loader import ConfigLoader
 from collect.tray import MountainTray
-from collect.state import make_state, write_state, read_state, read_label_counts, write_plan, read_plan, PLAN_FILENAME
+from collect.state import make_state, write_state, read_state, write_plan, read_plan
+from collect.sync import sync
 
 # --- Globals ---
 LOG_FILE = "data/collection.log"
 
 # --- Core Business Logic ---
+
 
 class WebcamStream:
     def __init__(self, url: str):
@@ -39,6 +38,7 @@ class WebcamStream:
     def release(self):
         self.cap.release()
 
+
 class WeatherFetcher:
     def __init__(self, station_id: str = "KSEA"):
         self.station_id = station_id
@@ -48,11 +48,12 @@ class WeatherFetcher:
         try:
             response = requests.get(self.base_url, timeout=10)
             response.raise_for_status()
-            lines = response.text.strip().split('\\n')
+            lines = response.text.strip().split("\\n")
             return lines[1] if len(lines) >= 2 else lines[0]
         except requests.RequestException as e:
             logging.warning(f"Error fetching METAR: {e}")
         return None
+
 
 def _derive_initial_last_capture_at(
     plan_timestamps: List[str],
@@ -65,7 +66,8 @@ def _derive_initial_last_capture_at(
     Priority: most recent past plan timestamp → previous state file value
     (only if it's actually in the past).
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     past = [t for t in plan_timestamps if datetime.fromisoformat(t) <= now_utc]
     if past:
         return past[-1]
@@ -87,12 +89,20 @@ def log_event(event: str, status: str, metadata: Optional[Dict] = None):
         "timestamp": datetime.now(UTC).isoformat(),
         "event": event,
         "status": status,
-        "metadata": metadata or {}
+        "metadata": metadata or {},
     }
     with open(log_path, "a") as f:
         f.write(json.dumps(entry) + "\n")
 
-def perform_capture(config_loader: ConfigLoader, weather_fetcher: WeatherFetcher, data_root: str, session_uuid: Optional[str] = None, step_info: Optional[Dict] = None, remote_storage=None) -> Optional[Path]:
+
+def perform_capture(
+    config_loader: ConfigLoader,
+    weather_fetcher: WeatherFetcher,
+    data_root: str,
+    session_uuid: Optional[str] = None,
+    step_info: Optional[Dict] = None,
+    remote_storage=None,
+) -> Optional[Path]:
     now_utc = datetime.now(UTC)
     date_str = now_utc.strftime("%Y%m%d")
     time_str = now_utc.strftime("%H%M%S_%f_UTC")
@@ -124,7 +134,9 @@ def perform_capture(config_loader: ConfigLoader, weather_fetcher: WeatherFetcher
     try:
         frame = stream.capture_raw()
         if frame is not None:
-            safe_name = str(source).replace("/", "_").replace(":", "_").replace(".", "_")
+            safe_name = (
+                str(source).replace("/", "_").replace(":", "_").replace(".", "_")
+            )
             filename = f"{time_str}_{safe_name}.jpg"
             image_path = image_dir / filename
             cv2.imwrite(str(image_path), frame)
@@ -132,7 +144,9 @@ def perform_capture(config_loader: ConfigLoader, weather_fetcher: WeatherFetcher
 
             # Upload to R2 if a remote storage backend is provided
             if remote_storage is not None:
-                _upload_to_remote(remote_storage, data_root, image_path, frame, metar_path, metar_text)
+                _upload_to_remote(
+                    remote_storage, data_root, image_path, frame, metar_path, metar_text
+                )
 
             return image_path
         else:
@@ -142,7 +156,14 @@ def perform_capture(config_loader: ConfigLoader, weather_fetcher: WeatherFetcher
         stream.release()
 
 
-def _upload_to_remote(storage, data_root: str, image_path: Path, frame, metar_path: Optional[Path], metar_text: Optional[str]) -> None:
+def _upload_to_remote(
+    storage,
+    data_root: str,
+    image_path: Path,
+    frame,
+    metar_path: Optional[Path],
+    metar_text: Optional[str],
+) -> None:
     """Best-effort upload of a capture to the remote storage backend."""
     try:
         root = Path(data_root)
@@ -155,7 +176,9 @@ def _upload_to_remote(storage, data_root: str, image_path: Path, frame, metar_pa
     except Exception as e:
         logging.warning(f"R2 upload failed (non-fatal): {e}")
 
+
 # --- CLI using Click ---
+
 
 @click.group(invoke_without_command=True)
 @click.pass_context
@@ -164,11 +187,20 @@ def cli(ctx, **kwargs):
     if ctx.invoked_subcommand is None:
         ctx.invoke(tray)
 
-def run_tray_loop(config_path: str, data_root: str, is_once: bool = False, session_id: Optional[str] = None):
-    """Internal implementation for running the tray icon loop."""
-    from datetime import datetime, timezone, timedelta
 
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+def run_tray_loop(
+    config_path: str,
+    data_root: str,
+    is_once: bool = False,
+    session_id: Optional[str] = None,
+):
+    """Internal implementation for running the tray icon loop."""
+    from datetime import datetime, timezone
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
 
     if not session_id:
         session_id = str(uuid.uuid4())[:8]
@@ -181,8 +213,11 @@ def run_tray_loop(config_path: str, data_root: str, is_once: bool = False, sessi
     if config_loader.storage_backend == "r2":
         try:
             from collect.storage import R2Storage
+
             cfg = config_loader.storage_config
-            remote_storage = R2Storage(account_id=cfg["r2_account_id"], bucket=cfg["r2_bucket"])
+            remote_storage = R2Storage(
+                account_id=cfg["r2_account_id"], bucket=cfg["r2_bucket"]
+            )
             logging.info(f"R2 upload enabled: {cfg['r2_bucket']}")
         except Exception as e:
             logging.warning(f"R2 storage init failed, continuing local-only: {e}")
@@ -190,13 +225,19 @@ def run_tray_loop(config_path: str, data_root: str, is_once: bool = False, sessi
     # Load plan if one exists
     all_plan_timestamps = read_plan(data_root) or []
     now_utc = datetime.now(timezone.utc)
-    plan_timestamps = [t for t in all_plan_timestamps if datetime.fromisoformat(t) > now_utc]
+    plan_timestamps = [
+        t for t in all_plan_timestamps if datetime.fromisoformat(t) > now_utc
+    ]
     if all_plan_timestamps:
         logging.info(f"Loaded plan: {len(plan_timestamps)} captures remaining.")
     else:
-        logging.info(f"No plan file found. Using fixed interval ({fallback_interval}s).")
+        logging.info(
+            f"No plan file found. Using fixed interval ({fallback_interval}s)."
+        )
 
-    plan_last_capture_at = _derive_initial_last_capture_at(all_plan_timestamps, data_root, now_utc, session_id)
+    plan_last_capture_at = _derive_initial_last_capture_at(
+        all_plan_timestamps, data_root, now_utc, session_id
+    )
     plan_final_capture_at = all_plan_timestamps[-1] if all_plan_timestamps else None
 
     plan_total = len(plan_timestamps) if plan_timestamps else 0
@@ -216,7 +257,9 @@ def run_tray_loop(config_path: str, data_root: str, is_once: bool = False, sessi
         _prior = json.loads(_prior_path.read_text())
         prior_capture_count = _prior.get("capture_count", 0)
         prior_plan_total = _prior.get("plan_total", 0)
-        logging.info(f"Prior sessions: {prior_capture_count}/{prior_plan_total} captures carried over.")
+        logging.info(
+            f"Prior sessions: {prior_capture_count}/{prior_plan_total} captures carried over."
+        )
     except Exception:
         pass
 
@@ -227,11 +270,7 @@ def run_tray_loop(config_path: str, data_root: str, is_once: bool = False, sessi
 
     def _append_session_label(image_path: Path, is_adhoc: bool = False) -> None:
         rel = str(image_path.relative_to(Path(data_root)))
-        entry = {
-            rel: {
-                "type": "manual" if is_adhoc else "scheduled"
-            }
-        }
+        entry = {rel: {"type": "manual" if is_adhoc else "scheduled"}}
         with open(session_labels_file, "a") as f:
             yaml.dump(entry, f, default_flow_style=False)
 
@@ -250,7 +289,7 @@ def run_tray_loop(config_path: str, data_root: str, is_once: bool = False, sessi
             wait = max(0, (target - datetime.now(timezone.utc)).total_seconds())
         else:
             wait = fallback_interval
-        
+
         logging.info(f"Next capture in {int(wait)}s.")
         end = time.monotonic() + wait
         while time.monotonic() < end:
@@ -261,30 +300,46 @@ def run_tray_loop(config_path: str, data_root: str, is_once: bool = False, sessi
                 logging.info("Ad-hoc trigger detected!")
                 try:
                     trigger_file.unlink()
-                except Exception: pass
+                except Exception:
+                    pass
                 return True
             time.sleep(min(1, end - time.monotonic()))
         return False
 
     def capture_loop():
-        nonlocal capture_count, plan_index, last_capture_at, plan_total, plan_final_capture_at
+        nonlocal \
+            capture_count, \
+            plan_index, \
+            last_capture_at, \
+            plan_total, \
+            plan_final_capture_at
 
         while not stop_event.is_set():
             # Scheduled capture start
-            write_state(data_root, make_state(
-                session_id=session_id, status="Capturing...",
-                capture_count=capture_count,
-                plan_total=plan_total,
-                interval_seconds=fallback_interval,
-                last_capture_at=last_capture_at,
-                next_capture_at=_next_capture_at(),
-                session_labels_file=str(session_labels_file),
-                final_capture_at=plan_final_capture_at,
-                prior_capture_count=prior_capture_count,
-                prior_plan_total=prior_plan_total,
-            ))
+            write_state(
+                data_root,
+                make_state(
+                    session_id=session_id,
+                    status="Capturing...",
+                    capture_count=capture_count,
+                    plan_total=plan_total,
+                    interval_seconds=fallback_interval,
+                    last_capture_at=last_capture_at,
+                    next_capture_at=_next_capture_at(),
+                    session_labels_file=str(session_labels_file),
+                    final_capture_at=plan_final_capture_at,
+                    prior_capture_count=prior_capture_count,
+                    prior_plan_total=prior_plan_total,
+                ),
+            )
 
-            image_path = perform_capture(config_loader, weather_fetcher, data_root, session_uuid=session_id, remote_storage=remote_storage)
+            image_path = perform_capture(
+                config_loader,
+                weather_fetcher,
+                data_root,
+                session_uuid=session_id,
+                remote_storage=remote_storage,
+            )
 
             if image_path:
                 capture_count += 1
@@ -294,19 +349,22 @@ def run_tray_loop(config_path: str, data_root: str, is_once: bool = False, sessi
             if plan_timestamps:
                 plan_index += 1
 
-            write_state(data_root, make_state(
-                session_id=session_id,
-                status="Idle" if image_path else "Error",
-                capture_count=capture_count,
-                plan_total=plan_total,
-                interval_seconds=fallback_interval,
-                last_capture_at=last_capture_at,
-                next_capture_at=_next_capture_at(),
-                session_labels_file=str(session_labels_file),
-                final_capture_at=plan_final_capture_at,
-                prior_capture_count=prior_capture_count,
-                prior_plan_total=prior_plan_total,
-            ))
+            write_state(
+                data_root,
+                make_state(
+                    session_id=session_id,
+                    status="Idle" if image_path else "Error",
+                    capture_count=capture_count,
+                    plan_total=plan_total,
+                    interval_seconds=fallback_interval,
+                    last_capture_at=last_capture_at,
+                    next_capture_at=_next_capture_at(),
+                    session_labels_file=str(session_labels_file),
+                    final_capture_at=plan_final_capture_at,
+                    prior_capture_count=prior_capture_count,
+                    prior_plan_total=prior_plan_total,
+                ),
+            )
 
             if is_once:
                 logging.info("Single capture complete.")
@@ -319,10 +377,14 @@ def run_tray_loop(config_path: str, data_root: str, is_once: bool = False, sessi
                 try:
                     import sys as _sys
                     from datetime import timedelta as _td
+
                     _sys.path.insert(0, str(Path(config_path).resolve().parent))
                     from tools.plan import CapturePlan
+
                     planner = CapturePlan(47.6533, -122.3091)
-                    _now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+                    _now = datetime.now(timezone.utc).replace(
+                        minute=0, second=0, microsecond=0
+                    )
                     intervals = planner.generate(_now, days=30)
                     new_ts = []
                     current = _now
@@ -332,13 +394,21 @@ def run_tray_loop(config_path: str, data_root: str, is_once: bool = False, sessi
                         current = current + _td(seconds=int(step[:-1]))
                         new_ts.append(current.isoformat())
                     write_plan(data_root, new_ts)
-                    plan_timestamps[:] = [t for t in new_ts if datetime.fromisoformat(t) > datetime.now(timezone.utc)]
+                    plan_timestamps[:] = [
+                        t
+                        for t in new_ts
+                        if datetime.fromisoformat(t) > datetime.now(timezone.utc)
+                    ]
                     plan_index = 0
                     plan_total = len(plan_timestamps)
                     plan_final_capture_at = new_ts[-1] if new_ts else None
-                    logging.info(f"New plan: {len(plan_timestamps)} captures over 30 days.")
+                    logging.info(
+                        f"New plan: {len(plan_timestamps)} captures over 30 days."
+                    )
                 except Exception:
-                    logging.exception("Failed to regenerate plan. Falling back to fixed interval.")
+                    logging.exception(
+                        "Failed to regenerate plan. Falling back to fixed interval."
+                    )
                     plan_timestamps.clear()
                     plan_index = 0
                     plan_total = 0
@@ -349,47 +419,66 @@ def run_tray_loop(config_path: str, data_root: str, is_once: bool = False, sessi
                 if not is_adhoc:
                     # Normal scheduled wakeup
                     break
-                
+
                 # Ad-hoc capture wakeup
-                write_state(data_root, make_state(
-                    session_id=session_id, status="Capturing (Ad-hoc)...",
-                    capture_count=capture_count,
-                    plan_total=plan_total,
-                    interval_seconds=fallback_interval,
-                    last_capture_at=last_capture_at,
-                    next_capture_at=_next_capture_at(),
-                    session_labels_file=str(session_labels_file),
-                    final_capture_at=plan_final_capture_at,
-                ))
-                
-                image_path = perform_capture(config_loader, weather_fetcher, data_root, session_uuid=session_id, remote_storage=remote_storage)
+                write_state(
+                    data_root,
+                    make_state(
+                        session_id=session_id,
+                        status="Capturing (Ad-hoc)...",
+                        capture_count=capture_count,
+                        plan_total=plan_total,
+                        interval_seconds=fallback_interval,
+                        last_capture_at=last_capture_at,
+                        next_capture_at=_next_capture_at(),
+                        session_labels_file=str(session_labels_file),
+                        final_capture_at=plan_final_capture_at,
+                    ),
+                )
+
+                image_path = perform_capture(
+                    config_loader,
+                    weather_fetcher,
+                    data_root,
+                    session_uuid=session_id,
+                    remote_storage=remote_storage,
+                )
                 if image_path:
                     capture_count += 1
                     last_capture_at = datetime.now(timezone.utc).isoformat()
                     _append_session_label(image_path, is_adhoc=True)
-                
-                write_state(data_root, make_state(
-                    session_id=session_id, status="Idle",
-                    capture_count=capture_count,
-                    plan_total=plan_total,
-                    interval_seconds=fallback_interval,
-                    last_capture_at=last_capture_at,
-                    next_capture_at=_next_capture_at(),
-                    session_labels_file=str(session_labels_file),
-                    final_capture_at=plan_final_capture_at,
-                ))
+
+                write_state(
+                    data_root,
+                    make_state(
+                        session_id=session_id,
+                        status="Idle",
+                        capture_count=capture_count,
+                        plan_total=plan_total,
+                        interval_seconds=fallback_interval,
+                        last_capture_at=last_capture_at,
+                        next_capture_at=_next_capture_at(),
+                        session_labels_file=str(session_labels_file),
+                        final_capture_at=plan_final_capture_at,
+                    ),
+                )
 
     # Write initial state before starting tray so first _refresh() has data.
     # last_capture_at is derived from the plan (most recent past timestamp).
-    write_state(data_root, make_state(
-        session_id=session_id, status="Starting...",
-        capture_count=capture_count, plan_total=plan_total,
-        interval_seconds=fallback_interval,
-        last_capture_at=last_capture_at,
-        next_capture_at=_next_capture_at(),
-        session_labels_file=str(session_labels_file),
-        final_capture_at=plan_final_capture_at,
-    ))
+    write_state(
+        data_root,
+        make_state(
+            session_id=session_id,
+            status="Starting...",
+            capture_count=capture_count,
+            plan_total=plan_total,
+            interval_seconds=fallback_interval,
+            last_capture_at=last_capture_at,
+            next_capture_at=_next_capture_at(),
+            session_labels_file=str(session_labels_file),
+            final_capture_at=plan_final_capture_at,
+        ),
+    )
 
     t = threading.Thread(target=capture_loop, daemon=True)
     t.start()
@@ -404,14 +493,15 @@ def run_tray_loop(config_path: str, data_root: str, is_once: bool = False, sessi
 
 
 @cli.command()
-@click.option('--data-root', default='data', help='Root directory for data storage.')
-@click.option('--days', default=30, help='Number of days to plan ahead.')
-@click.option('--lat', default=47.6533, help='Latitude of camera location.')
-@click.option('--lon', default=-122.3091, help='Longitude of camera location.')
+@click.option("--data-root", default="data", help="Root directory for data storage.")
+@click.option("--days", default=30, help="Number of days to plan ahead.")
+@click.option("--lat", default=47.6533, help="Latitude of camera location.")
+@click.option("--lon", default=-122.3091, help="Longitude of camera location.")
 def schedule(data_root: str, days: int, lat: float, lon: float):
     """Generate a solar-aligned capture plan and save it to capture_plan.json."""
     import sys as _sys
     from datetime import datetime, timezone, timedelta as _timedelta
+
     _sys.path.insert(0, str(Path(__file__).parent.parent))
     from tools.plan import CapturePlan
 
@@ -437,27 +527,32 @@ def schedule(data_root: str, days: int, lat: float, lon: float):
 
 
 @cli.command()
-@click.option('--config', default='mountain.toml', help='Path to config file.')
-@click.option('--data-root', default='data', help='Root directory for data storage.')
-@click.option('--session-id', default=None, help='Unique ID for this session.')
+@click.option("--config", default="mountain.toml", help="Path to config file.")
+@click.option("--data-root", default="data", help="Root directory for data storage.")
+@click.option("--session-id", default=None, help="Unique ID for this session.")
 def tray(config: str, data_root: str, session_id: str):
     """Runs continuous collection with a system tray icon."""
     run_tray_loop(config, data_root, is_once=False, session_id=session_id)
 
+
 @cli.command()
-@click.option('--config', default='mountain.toml', help='Path to config file.')
-@click.option('--data-root', default='data', help='Root directory for data storage.')
-@click.option('--session-id', default=None, help='Unique ID for this session.')
+@click.option("--config", default="mountain.toml", help="Path to config file.")
+@click.option("--data-root", default="data", help="Root directory for data storage.")
+@click.option("--session-id", default=None, help="Unique ID for this session.")
 def once(config: str, data_root: str, session_id: str):
     """Performs a single capture, showing a tray icon briefly."""
     run_tray_loop(config, data_root, is_once=True, session_id=session_id)
 
+
 @cli.command()
-@click.option('--config', default='mountain.toml', help='Path to config file.')
-@click.option('--data-root', default='data', help='Root directory for data storage.')
+@click.option("--config", default="mountain.toml", help="Path to config file.")
+@click.option("--data-root", default="data", help="Root directory for data storage.")
 def live(config: str, data_root: str):
     """Runs continuous collection in the foreground (no tray icon)."""
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
     session_id = str(uuid.uuid4())[:8]
     config_loader = ConfigLoader(config)
     weather_fetcher = WeatherFetcher(config_loader.metar_station)
@@ -467,21 +562,32 @@ def live(config: str, data_root: str):
     if config_loader.storage_backend == "r2":
         try:
             from collect.storage import R2Storage
+
             cfg = config_loader.storage_config
-            remote_storage = R2Storage(account_id=cfg["r2_account_id"], bucket=cfg["r2_bucket"])
+            remote_storage = R2Storage(
+                account_id=cfg["r2_account_id"], bucket=cfg["r2_bucket"]
+            )
             logging.info(f"R2 upload enabled: {cfg['r2_bucket']}")
         except Exception as e:
             logging.warning(f"R2 storage init failed, continuing local-only: {e}")
 
-    logging.info(f"Starting live collection loop (interval: {interval}s). Press Ctrl+C to stop.")
+    logging.info(
+        f"Starting live collection loop (interval: {interval}s). Press Ctrl+C to stop."
+    )
     try:
         while True:
-            perform_capture(config_loader, weather_fetcher, data_root, session_uuid=session_id, remote_storage=remote_storage)
+            perform_capture(
+                config_loader,
+                weather_fetcher,
+                data_root,
+                session_uuid=session_id,
+                remote_storage=remote_storage,
+            )
             time.sleep(interval)
     except KeyboardInterrupt:
         logging.info("Stopping live collection.")
 
-from collect.sync import sync
+
 cli.add_command(sync)
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 Used by `.github/workflows/update.yml` on a 15-minute schedule.
 """
+
 import argparse
 import io
 import json
@@ -27,12 +28,14 @@ from train.model import ConvNextLoRAModel  # noqa: E402
 
 CLASS_NAMES = ["not_out", "full", "partial"]
 
-IMAGE_TRANSFORM = transforms.Compose([
-    transforms.Resize(224),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-])
+IMAGE_TRANSFORM = transforms.Compose(
+    [
+        transforms.Resize(224),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]
+)
 
 
 def fetch_webcam_tensor(url: str, timeout: float = 20.0) -> torch.Tensor:
@@ -89,7 +92,9 @@ def git_short_sha() -> str | None:
 
 
 def predict(checkpoint_dir: str, webcam_url: str, station: str, storage=None) -> dict:
-    model = ConvNextLoRAModel(num_classes=3, checkpoint_dir=checkpoint_dir, device="cpu", storage=storage)
+    model = ConvNextLoRAModel(
+        num_classes=3, checkpoint_dir=checkpoint_dir, device="cpu", storage=storage
+    )
     model.model_dict.eval()
 
     image_tensor = fetch_webcam_tensor(webcam_url)
@@ -101,7 +106,9 @@ def predict(checkpoint_dir: str, webcam_url: str, station: str, storage=None) ->
     idx = int(max(range(3), key=lambda i: probs[i]))
 
     return {
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "timestamp_utc": datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
         "class_index": idx,
         "class_name": CLASS_NAMES[idx],
         "is_out": idx in (1, 2),
@@ -123,7 +130,9 @@ def _append_log(log_path: Path, record: dict) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run a single visibility prediction and write state.json.")
+    parser = argparse.ArgumentParser(
+        description="Run a single visibility prediction and write state.json."
+    )
     parser.add_argument("--config", default="mountain.toml")
     parser.add_argument("--out", default="web/public/state.json")
     parser.add_argument(
@@ -172,7 +181,9 @@ def main() -> int:
     finally:
         finished_at = datetime.now(timezone.utc)
         record["finished_at"] = _iso_utc(finished_at)
-        record["duration_seconds"] = round((finished_at - started_at).total_seconds(), 3)
+        record["duration_seconds"] = round(
+            (finished_at - started_at).total_seconds(), 3
+        )
         _append_log(Path(args.log), record)
 
     return exit_code
