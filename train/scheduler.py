@@ -107,7 +107,8 @@ class Trainer:
                         image_list, weather_list, label_list = [], [], []
 
                 time.sleep(self.config_loader.capture_interval_seconds)
-        except (KeyboardInterrupt, SystemExit):
+        # Keep the parens 3.13-compatible; ruff's py314 style would strip them.
+        except (KeyboardInterrupt, SystemExit):  # fmt: skip
             print("\nExiting live training loop.")
 
 
