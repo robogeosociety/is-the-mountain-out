@@ -26,7 +26,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TERRAFORM_DIR="$REPO_ROOT/terraform"
 WORKER_DIR="$REPO_ROOT/worker"
 
-GH_OWNER="tommyroar"
+GH_OWNER="robogeosociety"
 GH_REPO="is-the-mountain-out"
 IMAGE_REPO="ghcr.io/$GH_OWNER/$GH_REPO/inference"
 

@@ -1,6 +1,6 @@
 name: Claude PR Assistant
 
-# Canonical @claude responder — source of truth: tommyroar/.github.
+# Canonical @claude responder — source of truth: robogeosociety/.github.
 # Synced into every owned repo by scripts/sync.sh. Also selectable one-click
 # from the Actions "New workflow" UI. Auth: CLAUDE_CODE_OAUTH_TOKEN (Max sub).
 

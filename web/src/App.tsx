@@ -134,7 +134,7 @@ function App() {
         Mount Rainier · UW ATG webcam · METAR {state?.weather?.station ?? '—'} ·{' '}
         <a
           className="underline hover:opacity-100"
-          href="https://github.com/tommyroar/is-the-mountain-out"
+          href="https://github.com/robogeosociety/is-the-mountain-out"
         >
           source
         </a>
