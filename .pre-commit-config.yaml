@@ -1,4 +1,4 @@
-# Canonical pre-commit config — source of truth: tommyroar/.github, synced by scripts/sync.sh.
+# Canonical pre-commit config — source of truth: robogeosociety/.github, synced by scripts/sync.sh.
 # One-time per clone:   uv tool install pre-commit && pre-commit install
 # Ruff version here is kept in lockstep with the ruff run in CI.
 minimum_pre_commit_version: "3.5.0"

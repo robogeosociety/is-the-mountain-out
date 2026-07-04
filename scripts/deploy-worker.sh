@@ -17,12 +17,12 @@
 # Env overrides:
 #   DEPLOY_ENV   GitHub Deployment environment      (default: production)
 #   WORKER_URL   live URL recorded on the status    (default: the workers.dev URL)
-#   GH_REPO      owner/repo                          (default: tommyroar/is-the-mountain-out)
+#   GH_REPO      owner/repo                          (default: robogeosociety/is-the-mountain-out)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKER_DIR="$REPO_ROOT/worker"
-GH_REPO="${GH_REPO:-tommyroar/is-the-mountain-out}"
+GH_REPO="${GH_REPO:-robogeosociety/is-the-mountain-out}"
 DEPLOY_ENV="${DEPLOY_ENV:-production}"
 WORKER_URL="${WORKER_URL:-https://mountain-inference.tommy-b-doerr.workers.dev}"
 
