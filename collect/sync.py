@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 def _get_r2(config_path: str) -> R2Storage:
     config = ConfigLoader(config_path)
     if config.storage_backend != "r2":
-        raise click.ClickException("R2 storage is not configured. Add [storage] section to mountain.toml.")
+        raise click.ClickException(
+            "R2 storage is not configured. Add [storage] section to mountain.toml."
+        )
     cfg = config.storage_config
     return R2Storage(account_id=cfg["r2_account_id"], bucket=cfg["r2_bucket"])
 
@@ -36,7 +38,9 @@ def push(config: str, data_root: str):
 
     all_keys = local.list_keys()
     # Filter to capture data only (images + metar), skip state/config files
-    capture_keys = [k for k in all_keys if "/" in k and (k.endswith(".jpg") or k.endswith(".txt"))]
+    capture_keys = [
+        k for k in all_keys if "/" in k and (k.endswith(".jpg") or k.endswith(".txt"))
+    ]
 
     uploaded = 0
     skipped = 0
@@ -51,7 +55,9 @@ def push(config: str, data_root: str):
         except Exception as e:
             logger.warning(f"Failed to upload {key}: {e}")
 
-    click.echo(f"Push complete: {uploaded} uploaded, {skipped} skipped (already in R2).")
+    click.echo(
+        f"Push complete: {uploaded} uploaded, {skipped} skipped (already in R2)."
+    )
 
 
 @sync.command()
@@ -65,7 +71,9 @@ def pull(config: str, data_root: str):
 
     all_keys = r2.list_keys()
     # Filter to capture data only
-    capture_keys = [k for k in all_keys if "/" in k and (k.endswith(".jpg") or k.endswith(".txt"))]
+    capture_keys = [
+        k for k in all_keys if "/" in k and (k.endswith(".jpg") or k.endswith(".txt"))
+    ]
 
     downloaded = 0
     skipped = 0
@@ -80,7 +88,9 @@ def pull(config: str, data_root: str):
         except Exception as e:
             logger.warning(f"Failed to download {key}: {e}")
 
-    click.echo(f"Pull complete: {downloaded} downloaded, {skipped} skipped (already local).")
+    click.echo(
+        f"Pull complete: {downloaded} downloaded, {skipped} skipped (already local)."
+    )
 
 
 @sync.group()
@@ -115,7 +125,9 @@ def labels_push(config: str, data_root: str):
     r2.put_text("labels.yaml", yaml.safe_dump(merged))
 
     added = len(merged) - len(remote_labels)
-    click.echo(f"Labels pushed: {len(merged)} total ({added} new, {len(local_labels)} from local).")
+    click.echo(
+        f"Labels pushed: {len(merged)} total ({added} new, {len(local_labels)} from local)."
+    )
 
 
 @labels.command("pull")

@@ -5,6 +5,7 @@ The state file lives at {data_root}/collector_state.json and can be
 updated by any process that has access to the data directory, independently
 of whether the capture service is running.
 """
+
 import json
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
@@ -12,26 +13,28 @@ from pathlib import Path
 from typing import Dict, Optional
 
 STATE_FILENAME = "collector_state.json"
-PLAN_FILENAME  = "capture_plan.json"
+PLAN_FILENAME = "capture_plan.json"
+
 
 def _get_state_path(data_root: str | Path, session_id: str) -> Path:
     return Path(data_root) / f"collector_state_{session_id}.json"
 
+
 @dataclass
 class CollectorState:
     session_id: str
-    status: str                          # "Idle", "Capturing...", "Error"
+    status: str  # "Idle", "Capturing...", "Error"
     capture_count: int
-    plan_total: int                      # total planned captures (0 = unknown)
+    plan_total: int  # total planned captures (0 = unknown)
     interval_seconds: int
-    last_capture_at: Optional[str]       # ISO-8601 UTC
-    next_capture_at: Optional[str]       # ISO-8601 UTC
-    label_counts: Dict[str, int]         # {"0": N, "1": N, "2": N}
-    updated_at: str                      # ISO-8601 UTC
+    last_capture_at: Optional[str]  # ISO-8601 UTC
+    next_capture_at: Optional[str]  # ISO-8601 UTC
+    label_counts: Dict[str, int]  # {"0": N, "1": N, "2": N}
+    updated_at: str  # ISO-8601 UTC
     session_labels_file: Optional[str] = None  # path to labels.{uuid}.yaml
-    final_capture_at: Optional[str] = None      # ISO-8601 UTC of last planned capture
-    prior_capture_count: int = 0                 # captures from previous sessions toward same goal
-    prior_plan_total: int = 0                    # plan_total from previous sessions toward same goal
+    final_capture_at: Optional[str] = None  # ISO-8601 UTC of last planned capture
+    prior_capture_count: int = 0  # captures from previous sessions toward same goal
+    prior_plan_total: int = 0  # plan_total from previous sessions toward same goal
 
     @property
     def pct_complete(self) -> int:
@@ -62,17 +65,20 @@ def read_state(data_root: str | Path, session_id: str) -> Optional[CollectorStat
         return None
 
 
-
-
 def write_plan(data_root: str | Path, timestamps: list[str]) -> Path:
     """Save a list of ISO-8601 UTC capture timestamps to capture_plan.json."""
     path = Path(data_root) / PLAN_FILENAME
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({
-        "generated_at": _now_iso(),
-        "total": len(timestamps),
-        "captures": timestamps,
-    }, indent=2))
+    tmp.write_text(
+        json.dumps(
+            {
+                "generated_at": _now_iso(),
+                "total": len(timestamps),
+                "captures": timestamps,
+            },
+            indent=2,
+        )
+    )
     tmp.replace(path)
     return path
 
@@ -94,6 +100,7 @@ def read_label_counts(data_root: str | Path) -> Dict[str, int]:
         return {}
     try:
         import yaml
+
         with open(labels_path) as f:
             labels = yaml.safe_load(f) or {}
         counts: Dict[str, int] = {}

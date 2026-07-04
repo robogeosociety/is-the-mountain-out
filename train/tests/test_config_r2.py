@@ -1,6 +1,5 @@
 """Tests for ConfigLoader storage properties and get_storage() factory."""
 
-import pytest
 import tomli_w
 from unittest.mock import patch, MagicMock
 from train.config_loader import ConfigLoader
@@ -63,7 +62,10 @@ class TestGetStorageFactory:
         storage = loader.get_storage(str(tmp_path / "data"))
         assert isinstance(storage, LocalStorage)
 
-    @patch.dict("sys.modules", {"boto3": MagicMock(), "botocore": MagicMock(), "botocore.config": MagicMock()})
+    @patch.dict(
+        "sys.modules",
+        {"boto3": MagicMock(), "botocore": MagicMock(), "botocore.config": MagicMock()},
+    )
     def test_r2_returns_cached(self, tmp_path, monkeypatch):
         monkeypatch.setenv("R2_ACCESS_KEY_ID", "k")
         monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "s")
@@ -71,6 +73,7 @@ class TestGetStorageFactory:
         # Reload storage module so it picks up the mocked boto3
         import importlib
         import collect.storage
+
         importlib.reload(collect.storage)
         from collect.storage import CachedR2Storage
 
