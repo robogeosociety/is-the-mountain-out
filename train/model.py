@@ -1,9 +1,9 @@
+import os
+
 import timm
 import torch
-import torch.nn as nn
 from peft import LoraConfig, get_peft_model
-from typing import List, Optional
-import os
+from torch import nn
 
 
 class ConvNextLoRAModel(nn.Module):
@@ -12,9 +12,9 @@ class ConvNextLoRAModel(nn.Module):
         num_classes: int = 3,
         rank: int = 8,
         alpha: int = 16,
-        target_modules: List[str] = ["fc1", "fc2"],
+        target_modules: list[str] = ["fc1", "fc2"],
         device: str = "mps",
-        checkpoint_dir: Optional[str] = None,
+        checkpoint_dir: str | None = None,
         storage=None,
     ):
         super().__init__()
@@ -65,7 +65,7 @@ class ConvNextLoRAModel(nn.Module):
         weather_batch: torch.Tensor,
         label_batch: torch.Tensor,
         optimizer: torch.optim.Optimizer,
-        class_weights: Optional[torch.Tensor] = None,
+        class_weights: torch.Tensor | None = None,
     ):
         self.model_dict.train()
         optimizer.zero_grad()
@@ -100,8 +100,12 @@ class ConvNextLoRAModel(nn.Module):
             _, predicted = torch.max(outputs, 1)
             return predicted
 
-    def save_checkpoint(self, checkpoint_dir: str, storage=None):
-        """Saves LoRA adapters and classifier head locally, then uploads to R2 if storage is provided."""
+    def save_checkpoint(self, checkpoint_dir: str, storage=None) -> list[str]:
+        """Saves LoRA adapters and classifier head locally, then uploads to R2 if storage is provided.
+
+        Returns the list of remote keys actually uploaded (empty when storage is
+        None or every upload failed) so callers can report honestly.
+        """
         os.makedirs(checkpoint_dir, exist_ok=True)
         self.model_dict["backbone"].save_pretrained(checkpoint_dir)
         torch.save(
@@ -111,10 +115,15 @@ class ConvNextLoRAModel(nn.Module):
         print(f"Checkpoint saved to {checkpoint_dir}")
 
         if storage is not None:
-            self._upload_checkpoint(checkpoint_dir, storage)
+            return self._upload_checkpoint(checkpoint_dir, storage)
+        return []
 
-    def _upload_checkpoint(self, checkpoint_dir: str, storage):
-        """Upload checkpoint files to remote storage under checkpoints/ prefix."""
+    def _upload_checkpoint(self, checkpoint_dir: str, storage) -> list[str]:
+        """Upload checkpoint files to remote storage under checkpoints/ prefix.
+
+        Returns the keys that uploaded successfully; failures are logged, and
+        the summary print reflects reality instead of claiming blanket success.
+        """
         import logging
 
         checkpoint_files = [
@@ -122,15 +131,18 @@ class ConvNextLoRAModel(nn.Module):
             "adapter_model.safetensors",
             "classifier.pt",
         ]
+        uploaded: list[str] = []
         for fname in checkpoint_files:
             local_path = os.path.join(checkpoint_dir, fname)
             if os.path.exists(local_path):
                 try:
                     with open(local_path, "rb") as f:
                         storage.put(f"checkpoints/{fname}", f.read())
+                    uploaded.append(f"checkpoints/{fname}")
                 except Exception as e:
                     logging.warning(f"Failed to upload {fname} to R2: {e}")
-        print("Checkpoints uploaded to R2.")
+        print(f"Checkpoints uploaded to R2: {len(uploaded)}/{len(checkpoint_files)}.")
+        return uploaded
 
     def load_checkpoint(self, checkpoint_dir: str, storage=None):
         """Loads LoRA adapters and classifier head. Falls back to R2 if local is missing."""

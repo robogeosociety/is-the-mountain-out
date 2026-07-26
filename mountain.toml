@@ -23,6 +23,7 @@ schedule_seconds = 1800 # 30 minutes for training service
 capture_interval_seconds = 300 # 5 minutes between captures in 'live' loop
 gradient_accumulation_steps = 4 # Train after 4 captures
 checkpoint_dir = "train/checkpoints"
+scheduled_epochs = 5 # epochs per supervisor-scheduled weekly run (train/scheduled.py)
 
 [training.lora]
 rank = 8

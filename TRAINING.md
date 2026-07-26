@@ -23,6 +23,16 @@ the mountain-specific instance.
    the Discord reaction-labeling bot (👍/⛅/👎 on hourly webcam posts — see
    `BOT.md`). A batch run picks both up with no extra flags.
 
+   **Scheduled runs:** the robogeosociety/supervisor fires
+   `scripts/scheduled-train.sh` (→ `python -m train.scheduled`) on the mini
+   every Monday 04:00 — but only *trains* when `labels/discord-events.jsonl`
+   has events newer than the R2 watermark (`labels/train-watermark.json`);
+   idle weeks exit in seconds. Runs post start/finish telemetry to #mountain
+   (best-val-loss delta included; a failed run keeps the watermark so next
+   week retries). Epochs: `[training] scheduled_epochs`. Machine-readable
+   results via `training batch --json-summary` — trust it over stdout, which
+   historically claimed success on empty datasets and failed uploads.
+
    (the `training` console script → `train.scheduler:app`.)
 
 2. **Training runs locally on the most capable machine, *not* under Nomad.** It

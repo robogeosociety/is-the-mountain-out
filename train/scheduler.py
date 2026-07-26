@@ -1,15 +1,15 @@
-import time
-import torch
-import torch.optim as optim
-from datetime import datetime
-from typing import Optional
-import typer
-from pathlib import Path
 import subprocess
+import time
+from datetime import datetime
+from pathlib import Path
+
+import torch
+import typer
+from torch import optim
 
 from train.config_loader import ConfigLoader
-from train.utils import WebcamStream, WeatherFetcher
 from train.model import ConvNextLoRAModel
+from train.utils import WeatherFetcher, WebcamStream
 
 app = typer.Typer()
 
@@ -128,16 +128,51 @@ def live(config: str = "mountain.toml"):
 
 @app.command()
 def batch(
-    folder: Optional[str] = typer.Argument(None),
-    label: Optional[int] = None,
+    folder: str | None = typer.Argument(None),
+    label: int | None = None,
     config: str = "mountain.toml",
     epochs: int = 5,
     fresh: bool = False,
-    labels: Optional[str] = typer.Option(
+    labels: str | None = typer.Option(
         None, "--labels", help="Path to labels.yaml (overrides folder/labels.yaml)"
+    ),
+    json_summary: str | None = typer.Option(
+        None,
+        "--json-summary",
+        help="Write a machine-readable run summary (metrics, uploaded checkpoint "
+        "keys, ok/empty/no-improvement status) to this path — for unattended runs.",
     ),
 ):
     """Runs training using a labels index. Pass --labels path/to/labels.yaml or a folder containing labels.yaml."""
+    from datetime import UTC, datetime
+
+    started_at = datetime.now(UTC)
+    per_epoch: list[dict] = []
+    uploaded_keys: list[str] = []
+    best_epoch: int | None = None
+
+    def _write_summary(status: str, **extra) -> None:
+        """Atomic (tmp+rename) summary write; a scheduled wrapper parses this
+        instead of stdout — exit codes and prints here have known lie modes."""
+        if not json_summary:
+            return
+        summary = {
+            "status": status,
+            "started_at": started_at.isoformat(),
+            "finished_at": datetime.now(UTC).isoformat(),
+            "epochs": epochs,
+            "per_epoch": per_epoch,
+            "best_epoch": best_epoch,
+            "checkpoint_keys_uploaded": uploaded_keys,
+            **extra,
+        }
+        out = Path(json_summary)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_suffix(".tmp")
+        with open(tmp, "w") as f:
+            json.dump(summary, f, indent=2)
+        tmp.rename(out)
+
     trainer = Trainer(config, fresh=fresh)
 
     if labels:
@@ -150,11 +185,11 @@ def batch(
         typer.echo("Error: provide a --labels file or a folder argument.", err=True)
         raise typer.Exit(1)
 
-    import yaml
     import cv2
     import numpy as np
-    from torchvision import transforms
+    import yaml
     from metar import Metar
+    from torchvision import transforms
 
     # Resolve storage backend (local or R2 with cache)
     storage = trainer.config_loader.get_storage(str(data_root))
@@ -205,6 +240,21 @@ def batch(
     random.shuffle(final_training_list)
 
     print(f"Final training set size: {len(final_training_list)} samples.")
+
+    if not final_training_list:
+        # Historically this fell through to a 0-batch "success" (exit 0,
+        # best val_loss=inf, no checkpoint). Fail loudly instead.
+        _write_summary(
+            "empty",
+            labels_loaded=len(labels_map),
+            class_counts={
+                "not_out": len(labels_not_out),
+                "full": len(labels_full),
+                "partial": len(labels_partial),
+            },
+        )
+        typer.echo("Error: no labeled samples to train on.", err=True)
+        raise typer.Exit(1)
 
     # Prefetch all needed files from R2 into local cache (no-op for LocalStorage)
     from collect.storage import CachedR2Storage
@@ -280,11 +330,12 @@ def batch(
     )
 
     import json
+
     from rich.progress import (
-        Progress,
-        TextColumn,
         BarColumn,
+        Progress,
         TaskProgressColumn,
+        TextColumn,
         TimeRemainingColumn,
     )
 
@@ -506,10 +557,19 @@ def batch(
             print(
                 f"  Epoch {epoch + 1}: train_loss={avg_loss:.4f}  val_loss={val_loss:.4f}  val_acc={val_acc:.1%}"
             )
+            per_epoch.append(
+                {
+                    "epoch": epoch + 1,
+                    "train_loss": avg_loss,
+                    "val_loss": val_loss,
+                    "val_acc": val_acc,
+                }
+            )
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                trainer.model_wrapper.save_checkpoint(
+                best_epoch = epoch + 1
+                uploaded_keys = trainer.model_wrapper.save_checkpoint(
                     trainer.config_loader.checkpoint_dir, storage=storage
                 )
                 print(f"  ↳ Best model saved (val_loss={val_loss:.4f})")
@@ -535,6 +595,27 @@ def batch(
     # Clean up R2 cache if used
     if isinstance(storage, CachedR2Storage):
         storage.clear_cache()
+
+    if best_val_loss == float("inf"):
+        _write_summary("no-improvement", labels_loaded=len(labels_map))
+        typer.echo(
+            "Error: validation never produced a finite loss; no checkpoint saved.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    _write_summary(
+        "ok",
+        labels_loaded=len(labels_map),
+        class_counts={
+            "not_out": len(labels_not_out),
+            "full": len(labels_full),
+            "partial": len(labels_partial),
+        },
+        train_n=len(train_list),
+        val_n=len(val_list),
+        best_val_loss=best_val_loss,
+    )
 
     print(
         f"\nTraining complete (best val_loss={best_val_loss:.4f}). Running final evaluation..."
