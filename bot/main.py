@@ -163,20 +163,43 @@ class MountainBot(discord.Client):
         ):
             return
 
-        key = await self._capture_key_for_message(payload.message_id)
-        if key is None:
+        labelable = await self._labelable_message(payload.message_id)
+        if labelable is None:
             return
+        message, key = labelable
         if not await asyncio.to_thread(self.storage.exists, key):
             logger.warning(f"reaction on {key} ignored: capture not in storage")
             return
-        await asyncio.to_thread(
+        result = await asyncio.to_thread(
             labeler.record_label, self.storage, key, cls, user_id=payload.user_id
         )
         logger.info(
             f"labeled {key} = {cls} ({labeler.CLASS_NAMES[cls]}) by user {payload.user_id}"
         )
+        await self._edit_telemetry(message, cls, result)
 
-    async def _capture_key_for_message(self, message_id: int) -> str | None:
+    async def _edit_telemetry(
+        self, message: discord.Message, cls: int, result: labeler.LabelResult
+    ) -> None:
+        """Acknowledge a recorded label on the post itself (edit-in-place).
+
+        Only the bot's own messages are editable — reactions on the Worker's
+        webhook notifications still record, they just can't show the field.
+        Best-effort: an edit failure never loses the already-recorded label.
+        """
+        if not self.user or message.author.id != self.user.id or not message.embeds:
+            return
+        try:
+            updated = labeler.apply_telemetry(
+                message.embeds[0].to_dict(), labeler.telemetry_field(cls, result)
+            )
+            await message.edit(embed=discord.Embed.from_dict(updated))
+        except discord.HTTPException as exc:
+            logger.warning(f"telemetry edit failed (label already recorded): {exc}")
+
+    async def _labelable_message(
+        self, message_id: int
+    ) -> tuple[discord.Message, str] | None:
         channel = await self._channel()
         try:
             message = await channel.fetch_message(message_id)
@@ -189,7 +212,10 @@ class MountainBot(discord.Client):
         if not message.author.bot or not message.embeds:
             return None
         footer = message.embeds[0].footer
-        return labeler.capture_key_from_footer(footer.text if footer else None)
+        key = labeler.capture_key_from_footer(footer.text if footer else None)
+        if key is None:
+            return None
+        return message, key
 
     async def sweep_missed_reactions(self) -> None:
         """Recover labels from reactions added while the bot was offline."""
@@ -221,7 +247,7 @@ class MountainBot(discord.Client):
             )
             if label is None or current.get(key) == label:
                 continue
-            await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 labeler.record_label,
                 self.storage,
                 key,
@@ -231,6 +257,7 @@ class MountainBot(discord.Client):
             )
             current[key] = label
             swept += 1
+            await self._edit_telemetry(message, label, result)
         logger.info(f"reaction sweep complete: {swept} label(s) recovered")
 
 

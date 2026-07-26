@@ -41,6 +41,9 @@ EMOJI_TO_CLASS = {
 LABELS_KEY = "labels.yaml"  # same object the classifier UI and trainer share
 EVENTS_KEY = "labels/discord-events.jsonl"  # append-only provenance log
 
+# Embed field the bot edits onto its own post after recording a label.
+TELEMETRY_FIELD = "🏷️ Label"
+
 # Embed colors — mirror worker/src/discord-mountain-notify.ts.
 COLOR_VISIBLE = 0x2ECC71
 COLOR_NOT_VISIBLE = 0x95A5A6
@@ -266,6 +269,15 @@ def load_labels(storage, labels_key: str = LABELS_KEY) -> dict:
         return {}
 
 
+@dataclass(frozen=True)
+class LabelResult:
+    """Outcome of recording one label, with the stats the telemetry edit shows."""
+
+    labels: dict
+    total: int  # entries in labels.yaml after the merge
+    discord_count: int  # distinct captures ever labeled via Discord (events log)
+
+
 def record_label(
     storage,
     capture_key: str,
@@ -276,7 +288,7 @@ def record_label(
     labels_key: str = LABELS_KEY,
     events_key: str = EVENTS_KEY,
     now: datetime | None = None,
-) -> dict:
+) -> LabelResult:
     """Merge {capture_key: label} into labels.yaml and append a provenance event.
 
     Same union-merge contract as tools/classifier_server.py save_labels():
@@ -300,7 +312,41 @@ def record_label(
     except Exception:  # noqa: BLE001 — backend-specific miss/IO errors all mean "no log yet"
         existing = ""
     storage.put_text(events_key, existing + json.dumps(event) + "\n")
-    return labels
+
+    discord_captures = {capture_key}
+    for line in existing.splitlines():
+        try:
+            discord_captures.add(json.loads(line)["capture"])
+        except ValueError, KeyError:
+            continue
+    return LabelResult(
+        labels=labels, total=len(labels), discord_count=len(discord_captures)
+    )
+
+
+def telemetry_field(label: int, result: LabelResult) -> dict:
+    """The embed field acknowledging a recorded reaction, with running counts."""
+    return {
+        "name": TELEMETRY_FIELD,
+        "value": (
+            f"New reaction ({CLASS_LABELS[int(label)]}) recorded — "
+            f"{result.discord_count}/{result.total} training labels from Discord"
+        ),
+        "inline": False,
+    }
+
+
+def apply_telemetry(embed: Mapping[str, Any], field: Mapping[str, Any]) -> dict:
+    """Embed dict with *field* replacing any previous telemetry field.
+
+    Re-labeling edits the same field in place (last reaction wins), matching
+    the label-store semantics.
+    """
+    updated = dict(embed)
+    fields = [f for f in updated.get("fields", []) if f.get("name") != TELEMETRY_FIELD]
+    fields.append(dict(field))
+    updated["fields"] = fields
+    return updated
 
 
 # ---------- Reaction resolution ----------
