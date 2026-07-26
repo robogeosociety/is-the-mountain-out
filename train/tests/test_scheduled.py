@@ -65,10 +65,24 @@ SUMMARY = {
     "labels_loaded": 2004,
     "class_counts": {"not_out": 1729, "full": 109, "partial": 166},
     "best_val_loss": 0.0765,
-    "best_epoch": 3,
+    "best_epoch": 2,
+    "best_val_acc": 0.979,
+    "prefetch_s": 372.0,
     "per_epoch": [
-        {"epoch": 1, "train_loss": 0.31, "val_loss": 0.09, "val_acc": 0.955},
-        {"epoch": 2, "train_loss": 0.22, "val_loss": 0.0765, "val_acc": 0.979},
+        {
+            "epoch": 1,
+            "train_loss": 0.31,
+            "val_loss": 0.09,
+            "val_acc": 0.955,
+            "duration_s": 180.0,
+        },
+        {
+            "epoch": 2,
+            "train_loss": 0.22,
+            "val_loss": 0.0765,
+            "val_acc": 0.979,
+            "duration_s": 192.0,
+        },
     ],
     "checkpoint_keys_uploaded": [
         "checkpoints/adapter_config.json",
@@ -85,13 +99,33 @@ class TestEmbeds:
         assert "4 new Discord label event(s)" in embed["fields"][0]["value"]
 
     def test_result_embed_improvement(self):
-        embed = scheduled.result_embed(SUMMARY, 4, previous_best=0.0782, duration_s=900)
+        embed = scheduled.result_embed(
+            SUMMARY, 4, previous_best=0.0782, duration_s=900, previous_best_acc=0.976
+        )
         values = {f["name"]: f["value"] for f in embed["fields"]}
         assert embed["color"] == scheduled.COLOR_OK
         assert "▼ improved 0.0017" in values["Best val loss"]
         assert "1729/109/166" in values["Dataset"]
-        assert values["Duration"] == "15 min"
         assert "3/3 files" in values["Checkpoint"]
+        # Time telemetry: total · prefetch · avg per-epoch.
+        assert values["Duration"] == "15 min total · prefetch 6.2 min · ~3.1 min/epoch"
+        # Accuracy improvement in percentage points, arrows flipped vs loss.
+        assert values["Val accuracy"] == "97.9% — ▲ improved 0.3pt vs last (97.6%)"
+
+    def test_acc_regression_and_first_run_text(self):
+        assert "▼ regressed 1.9pt" in scheduled._acc_delta_text(0.957, 0.976)
+        assert "no previous run" in scheduled._acc_delta_text(0.979, None)
+        assert scheduled._acc_delta_text(None, 0.976) == "n/a"
+
+    def test_result_embed_acc_fallback_from_per_epoch(self):
+        # Older summaries lack best_val_acc — recover it from the best epoch's record.
+        legacy = {k: v for k, v in SUMMARY.items() if k != "best_val_acc"}
+        embed = scheduled.result_embed(legacy, 1, previous_best=None, duration_s=600)
+        values = {f["name"]: f["value"] for f in embed["fields"]}
+        assert values["Val accuracy"].startswith("97.9%")
+
+    def test_duration_text_without_breakdown(self):
+        assert scheduled._duration_text(600, {}) == "10 min total"
 
     def test_result_embed_regression_flagged(self):
         worse = dict(SUMMARY, best_val_loss=0.0900)
