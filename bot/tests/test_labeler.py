@@ -294,6 +294,14 @@ class TestRecordLabel:
     def test_load_labels_missing_file(self, tmp_path):
         assert labeler.load_labels(LocalStorage(str(tmp_path))) == {}
 
+    def test_uncached_storage_unwraps_cache(self, tmp_path):
+        class FakeCached:
+            r2 = "raw-backend"
+
+        assert labeler.uncached_storage(FakeCached()) == "raw-backend"
+        local = LocalStorage(str(tmp_path))
+        assert labeler.uncached_storage(local) is local
+
 
 # ---------- Reaction resolution ----------
 

@@ -50,7 +50,9 @@ class MountainBot(discord.Client):
         self.config_loader = config_loader
         self.data_root = data_root
         self.post_once = post_once
-        self.storage = config_loader.get_storage(data_root)
+        # Raw backend, never the training cache — a stale cached labels.yaml
+        # as a merge base would drop labels added to R2 by other surfaces.
+        self.storage = labeler.uncached_storage(config_loader.get_storage(data_root))
         self.weather = WeatherFetcher(config_loader.metar_station)
         self._last_post: datetime | None = None
         self._swept = False
