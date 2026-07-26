@@ -8,7 +8,7 @@ crons = ["*/15 * * * *"]
 
 # Container binding. Cloudflare Containers can only pull from its own managed
 # registry (not GHCR), so the image is pushed to registry.cloudflare.com:
-#   docker pull ghcr.io/tommyroar/is-the-mountain-out/inference:latest
+#   docker pull ghcr.io/robogeosociety/is-the-mountain-out/inference:latest
 #   docker tag  ... mountain-inference:latest
 #   wrangler containers push mountain-inference:latest
 # See .github/workflows/build-inference-image.yml for the upstream GHCR build.

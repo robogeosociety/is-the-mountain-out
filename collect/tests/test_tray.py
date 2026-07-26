@@ -1,23 +1,26 @@
 """Tests for MountainTray — mocks rumps so no GUI event loop is needed."""
-import sys
-from unittest.mock import MagicMock
+
 import pytest
 
 from collect.state import CollectorState, write_state, read_state, make_state
 from collect.tray import MountainTray, _fmt_time  # noqa: E402
+from collect.collector import _derive_initial_last_capture_at
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture()
 def data_root(tmp_path):
     return tmp_path
 
+
 @pytest.fixture()
 def tray(data_root):
     return MountainTray(data_root=str(data_root), session_id="abc123")
+
 
 @pytest.fixture()
 def base_state():
@@ -38,6 +41,7 @@ def base_state():
 # Identity
 # ---------------------------------------------------------------------------
 
+
 def test_initial_title_is_mountain_emoji(tray):
     assert tray.title == "🗻"
 
@@ -49,6 +53,7 @@ def test_initial_status_placeholder(tray):
 # ---------------------------------------------------------------------------
 # State file read/write round-trip
 # ---------------------------------------------------------------------------
+
 
 def test_write_and_read_state_roundtrip(data_root, base_state):
     write_state(data_root, base_state)
@@ -73,6 +78,7 @@ def test_write_is_atomic(data_root, base_state):
 # Rendering
 # ---------------------------------------------------------------------------
 
+
 def test_render_populates_status(tray, base_state):
     tray._render(base_state)
     assert "Idle" in tray.status_item.title
@@ -81,7 +87,7 @@ def test_render_populates_status(tray, base_state):
 def test_render_populates_progress(tray, base_state):
     tray._render(base_state)
     assert "10/628" in tray.progress_item.title
-    assert "1%" in tray.progress_item.title   # 10/628 = 1%
+    assert "1%" in tray.progress_item.title  # 10/628 = 1%
 
 
 def test_render_populates_next_capture(tray, base_state):
@@ -95,7 +101,6 @@ def test_render_populates_session(tray, base_state):
     assert "abc123" in tray.session_item.title
 
 
-
 def test_render_shows_placeholder_when_next_is_none(tray, base_state):
     base_state.next_capture_at = None
     tray._render(base_state)
@@ -104,16 +109,17 @@ def test_render_shows_placeholder_when_next_is_none(tray, base_state):
 
 def test_render_spinner_cycles(tray, base_state):
     from collect.tray import SPINNER
+
     base_state.status = "capturing"
-    
+
     # First frame
     tray._render(base_state)
     assert tray.title == f"🗻{SPINNER[0]}"
-    
+
     # Second frame
     tray._render(base_state)
     assert tray.title == f"🗻{SPINNER[1]}"
-    
+
     # Wrap around (after len(SPINNER) calls)
     tray._spinner_idx = len(SPINNER) - 1
     tray._render(base_state)
@@ -125,6 +131,7 @@ def test_render_spinner_cycles(tray, base_state):
 # ---------------------------------------------------------------------------
 # _refresh reads from state file
 # ---------------------------------------------------------------------------
+
 
 def test_refresh_reads_state_file(tray, data_root, base_state):
     write_state(data_root, base_state)
@@ -143,13 +150,14 @@ def test_refresh_skips_rerender_when_state_unchanged(tray, data_root, base_state
     tray._refresh()
     # Mutate a menu item directly — a re-render would reset it
     tray.status_item.title = "SENTINEL"
-    tray._refresh()   # same state object, should skip
+    tray._refresh()  # same state object, should skip
     assert tray.status_item.title == "SENTINEL"
 
 
 # ---------------------------------------------------------------------------
 # pct_complete
 # ---------------------------------------------------------------------------
+
 
 def test_pct_complete_normal():
     s = make_state("s", "Idle", capture_count=314, interval_seconds=600, plan_total=628)
@@ -174,6 +182,7 @@ def test_pct_complete_unknown_plan():
 # ---------------------------------------------------------------------------
 # _fmt_time helper
 # ---------------------------------------------------------------------------
+
 
 def test_fmt_time_past_date_includes_month_and_day():
     # A date in the past — should show "Mar 15 HH:MM" style
@@ -202,18 +211,13 @@ def test_fmt_time_invalid():
 # last_capture_at preservation through capture loop state writes
 # ---------------------------------------------------------------------------
 
-import sys as _sys
-import types as _types
-from unittest.mock import patch, MagicMock as _MagicMock
-from collect.state import write_plan, read_state, make_state, write_state
-from collect.collector import _derive_initial_last_capture_at
-
 
 def test_derive_initial_last_capture_at_from_plan_past(tmp_path):
     """Returns most recent past plan timestamp when one exists."""
     past = "2026-03-14T20:00:00+00:00"
     future = "2026-03-15T20:00:00+00:00"
     from datetime import datetime, timezone
+
     now = datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc)
     result = _derive_initial_last_capture_at([past, future], str(tmp_path), now, "sess")
     assert result == past
@@ -222,11 +226,20 @@ def test_derive_initial_last_capture_at_from_plan_past(tmp_path):
 def test_derive_initial_last_capture_at_falls_back_to_state_file(tmp_path):
     """When plan has no past timestamps, uses previous state file's last_capture_at."""
     past_time = "2026-03-14T20:00:00+00:00"
-    write_state(tmp_path, make_state("prev", "Idle", capture_count=5,
-                                     interval_seconds=600, plan_total=636,
-                                     last_capture_at=past_time))
+    write_state(
+        tmp_path,
+        make_state(
+            "prev",
+            "Idle",
+            capture_count=5,
+            interval_seconds=600,
+            plan_total=636,
+            last_capture_at=past_time,
+        ),
+    )
     future = "2026-03-15T20:00:00+00:00"
     from datetime import datetime, timezone
+
     now = datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc)
     result = _derive_initial_last_capture_at([future], str(tmp_path), now, "prev")
     assert result == past_time
@@ -235,10 +248,19 @@ def test_derive_initial_last_capture_at_falls_back_to_state_file(tmp_path):
 def test_derive_initial_last_capture_at_ignores_future_state(tmp_path):
     """Does not use previous state's last_capture_at if it's in the future."""
     future_time = "2026-03-16T20:00:00+00:00"
-    write_state(tmp_path, make_state("prev", "Idle", capture_count=5,
-                                     interval_seconds=600, plan_total=636,
-                                     last_capture_at=future_time))
+    write_state(
+        tmp_path,
+        make_state(
+            "prev",
+            "Idle",
+            capture_count=5,
+            interval_seconds=600,
+            plan_total=636,
+            last_capture_at=future_time,
+        ),
+    )
     from datetime import datetime, timezone
+
     now = datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc)
     result = _derive_initial_last_capture_at([], str(tmp_path), now, "prev")
     assert result is None
@@ -246,13 +268,16 @@ def test_derive_initial_last_capture_at_ignores_future_state(tmp_path):
 
 def test_derive_initial_last_capture_at_no_plan_no_state(tmp_path):
     from datetime import datetime, timezone
+
     now = datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc)
     assert _derive_initial_last_capture_at([], str(tmp_path), now, "any") is None
 
 
 def test_make_state_resets_last_capture_at_when_omitted(tmp_path):
     """Regression guard: make_state without last_capture_at yields None — callers must pass it."""
-    state = make_state("sess1", "Capturing...", capture_count=0, interval_seconds=600, plan_total=5)
+    state = make_state(
+        "sess1", "Capturing...", capture_count=0, interval_seconds=600, plan_total=5
+    )
     assert state.last_capture_at is None  # documenting the footgun the loop must avoid
 
 
@@ -260,8 +285,16 @@ def test_capturing_state_preserves_last_capture_at(tmp_path):
     """The capture loop must pass last_capture_at to EVERY write_state call, including Capturing."""
     past_time = "2026-03-14T20:00:00+00:00"
     # Simulate the fixed loop: Capturing... write includes last_capture_at explicitly
-    write_state(tmp_path, make_state("sess1", "Capturing...", capture_count=0,
-                                     interval_seconds=600, plan_total=5,
-                                     last_capture_at=past_time))
+    write_state(
+        tmp_path,
+        make_state(
+            "sess1",
+            "Capturing...",
+            capture_count=0,
+            interval_seconds=600,
+            plan_total=5,
+            last_capture_at=past_time,
+        ),
+    )
     state = read_state(tmp_path, "sess1")
     assert state.last_capture_at == past_time

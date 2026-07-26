@@ -6,6 +6,7 @@ result back to a public R2 bucket; this process is pure inference.
 Checkpoint is pulled from R2 on first /predict call (cached on local FS for
 subsequent calls within the container's lifetime).
 """
+
 import os
 import sys
 from pathlib import Path

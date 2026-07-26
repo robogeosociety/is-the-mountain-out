@@ -1,0 +1,11 @@
+# Canonical pre-commit config — source of truth: robogeosociety/.github, synced by scripts/sync.sh.
+# One-time per clone:   uv tool install pre-commit && pre-commit install
+# Ruff version here is kept in lockstep with the ruff run in CI.
+minimum_pre_commit_version: "3.5.0"
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.0
+    hooks:
+      - id: ruff          # lint (auto-fixes locally; CI only checks)
+        args: [--fix]
+      - id: ruff-format   # format

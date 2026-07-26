@@ -1,8 +1,6 @@
 """Tests for collect.storage backends."""
 
-import pytest
-from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 from collect.storage import LocalStorage, R2Storage, CachedR2Storage
 
@@ -52,9 +50,13 @@ class TestLocalStorage:
 
 
 class TestR2Storage:
-    @patch.dict("sys.modules", {"boto3": MagicMock(), "botocore": MagicMock(), "botocore.config": MagicMock()})
+    @patch.dict(
+        "sys.modules",
+        {"boto3": MagicMock(), "botocore": MagicMock(), "botocore.config": MagicMock()},
+    )
     def test_init_from_env(self, monkeypatch):
         import sys
+
         mock_boto3 = sys.modules["boto3"]
         monkeypatch.setenv("R2_ACCESS_KEY_ID", "test-key-id")
         monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "test-secret")
@@ -62,12 +64,15 @@ class TestR2Storage:
         # Re-import to pick up mocked boto3
         import importlib
         import collect.storage
+
         importlib.reload(collect.storage)
 
         store = collect.storage.R2Storage(account_id="abc123", bucket="my-bucket")
         mock_boto3.client.assert_called_once()
         call_kwargs = mock_boto3.client.call_args
-        assert call_kwargs[1]["endpoint_url"] == "https://abc123.r2.cloudflarestorage.com"
+        assert (
+            call_kwargs[1]["endpoint_url"] == "https://abc123.r2.cloudflarestorage.com"
+        )
         assert call_kwargs[1]["aws_access_key_id"] == "test-key-id"
         assert store.bucket == "my-bucket"
 
@@ -78,11 +83,15 @@ class TestR2Storage:
         store._client = mock_client
 
         store.put("key.jpg", b"data")
-        mock_client.put_object.assert_called_once_with(Bucket="b", Key="key.jpg", Body=b"data")
+        mock_client.put_object.assert_called_once_with(
+            Bucket="b", Key="key.jpg", Body=b"data"
+        )
 
     def test_get(self):
         mock_client = MagicMock()
-        mock_client.get_object.return_value = {"Body": MagicMock(read=lambda: b"img-data")}
+        mock_client.get_object.return_value = {
+            "Body": MagicMock(read=lambda: b"img-data")
+        }
         store = R2Storage.__new__(R2Storage)
         store.bucket = "b"
         store._client = mock_client
@@ -96,7 +105,9 @@ class TestR2Storage:
         store._client = mock_client
 
         store.put_text("metar.txt", "KSEA 221153Z")
-        mock_client.put_object.assert_called_once_with(Bucket="b", Key="metar.txt", Body=b"KSEA 221153Z")
+        mock_client.put_object.assert_called_once_with(
+            Bucket="b", Key="metar.txt", Body=b"KSEA 221153Z"
+        )
 
     def test_presign(self):
         mock_client = MagicMock()

@@ -1,11 +1,12 @@
 import http.server
 import socketserver
 import json
-import os
 import yaml
 from pathlib import Path
+from typing import Optional
 import urllib.parse
-import sys
+
+import typer
 
 # Minimal HTML for the classifier
 HTML_TEMPLATE = """
@@ -92,53 +93,53 @@ HTML_TEMPLATE = """
 </html>
 """
 
+
 class ClassifierHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
-        return # Silent
+        return  # Silent
 
     def do_GET(self):
-        if self.path == '/':
+        if self.path == "/":
             self.send_response(200)
-            self.send_header('Content-type', 'text/html')
+            self.send_header("Content-type", "text/html")
             self.end_headers()
             self.wfile.write(HTML_TEMPLATE.encode())
-        
-        elif self.path == '/api/data':
+
+        elif self.path == "/api/data":
             self.send_response(200)
-            self.send_header('Content-type', 'application/json')
+            self.send_header("Content-type", "application/json")
             self.end_headers()
-            
+
             # Scan for images
             data_root = Path(self.server.data_root)
             all_imgs = []
             for img_p in sorted(data_root.rglob("*.jpg")):
                 rel = str(img_p.relative_to(data_root))
                 all_imgs.append({"path": rel})
-            
+
             # Load existing labels
             labels = {}
             labels_p = data_root / "labels.yaml"
             if labels_p.exists():
-                with open(labels_p, 'r') as f:
+                with open(labels_p, "r") as f:
                     labels = yaml.safe_load(f) or {}
-            
-            # Filter out already labeled
-            unlabeled = [img for img in all_imgs if img['path'] not in labels]
-            
-            self.wfile.write(json.dumps({
-                "images": unlabeled,
-                "labels": labels
-            }).encode())
 
-        elif self.path.startswith('/img/'):
+            # Filter out already labeled
+            unlabeled = [img for img in all_imgs if img["path"] not in labels]
+
+            self.wfile.write(
+                json.dumps({"images": unlabeled, "labels": labels}).encode()
+            )
+
+        elif self.path.startswith("/img/"):
             rel_path = urllib.parse.unquote(self.path[5:])
             abs_path = Path(self.server.data_root) / rel_path
-            
+
             if abs_path.exists():
                 self.send_response(200)
-                self.send_header('Content-type', 'image/jpeg')
+                self.send_header("Content-type", "image/jpeg")
                 self.end_headers()
-                with open(abs_path, 'rb') as f:
+                with open(abs_path, "rb") as f:
                     self.wfile.write(f.read())
             else:
                 self.send_error(404)
@@ -146,25 +147,26 @@ class ClassifierHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
-        if self.path == '/api/label':
-            content_length = int(self.headers['Content-Length'])
+        if self.path == "/api/label":
+            content_length = int(self.headers["Content-Length"])
             post_data = json.loads(self.rfile.read(content_length))
-            
+
             data_root = Path(self.server.data_root)
             labels_p = data_root / "labels.yaml"
-            
+
             labels = {}
             if labels_p.exists():
-                with open(labels_p, 'r') as f:
+                with open(labels_p, "r") as f:
                     labels = yaml.safe_load(f) or {}
-            
-            labels[post_data['path']] = post_data['label']
-            
-            with open(labels_p, 'w') as f:
+
+            labels[post_data["path"]] = post_data["label"]
+
+            with open(labels_p, "w") as f:
                 yaml.safe_dump(labels, f)
-            
+
             self.send_response(200)
             self.end_headers()
+
 
 def run_classifier(data_root, port=9999):
     Handler = ClassifierHandler
@@ -176,44 +178,51 @@ def run_classifier(data_root, port=9999):
         try:
             # Auto-open browser
             import subprocess
+
             subprocess.run(["open", f"http://localhost:{port}"])
             httpd.serve_forever()
         except KeyboardInterrupt:
             print("\nStopping...")
             httpd.shutdown()
 
-import typer
-from typing import Optional
 
 cli = typer.Typer()
+
 
 def get_folder_via_picker(title="Select Data Root"):
     import tkinter as tk
     from tkinter import filedialog
+
     root = tk.Tk()
     root.withdraw()
     root.attributes("-topmost", True)
     root.focus_force()
     print("Opening folder picker...")
-    selected_dir = filedialog.askdirectory(title=title, initialdir=str(Path.cwd() / "data"))
+    selected_dir = filedialog.askdirectory(
+        title=title, initialdir=str(Path.cwd() / "data")
+    )
     root.destroy()
     return selected_dir
+
 
 @cli.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
     folder: Optional[str] = typer.Argument(None),
     port: int = 9999,
-    f: Optional[str] = typer.Option(None, "-f")
+    f: Optional[str] = typer.Option(None, "-f"),
 ):
-    if ctx.invoked_subcommand: return
-    
+    if ctx.invoked_subcommand:
+        return
+
     data_root = folder or f
     if not data_root:
         data_root = get_folder_via_picker()
-        if not data_root: return
-    
+        if not data_root:
+            return
+
     run_classifier(data_root, port)
+
 
 if __name__ == "__main__":
     cli()

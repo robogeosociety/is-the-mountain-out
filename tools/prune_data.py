@@ -14,7 +14,7 @@ from train.config_loader import ConfigLoader
 def load_labels(data_root):
     labels_path = Path(data_root) / "labels.yaml"
     if labels_path.exists():
-        with open(labels_path, 'r') as f:
+        with open(labels_path, "r") as f:
             return yaml.safe_load(f) or {}
     return {}
 
@@ -25,7 +25,7 @@ def save_labels(data_root, labels, storage):
     labels_path = Path(data_root) / "labels.yaml"
     labels_path.parent.mkdir(parents=True, exist_ok=True)
     text = yaml.safe_dump(labels)
-    with open(labels_path, 'w') as f:
+    with open(labels_path, "w") as f:
         f.write(text)
     storage.put_text("labels.yaml", text)
 
@@ -58,19 +58,32 @@ def _mtime_from_key(img_key: str) -> float:
     parts = Path(img_key).parts
     date_str, time_str = parts[0], parts[1]  # 20260222, 220834_724181_UTC
     hhmmss = time_str[:6]
-    return datetime.strptime(f"{date_str} {hhmmss}", "%Y%m%d %H%M%S").replace(tzinfo=UTC).timestamp()
+    return (
+        datetime.strptime(f"{date_str} {hhmmss}", "%Y%m%d %H%M%S")
+        .replace(tzinfo=UTC)
+        .timestamp()
+    )
 
 
 def _open_pil(storage, img_key: str):
     return Image.open(io.BytesIO(storage.get(img_key)))
 
 
-def prune_dataset(data_root="data", min_seconds=300, dark_thresh=10.0, diff_thresh=2.0,
-                  dry_run=True, force_keep_hourly=True, auto_label_metar=True):
+def prune_dataset(
+    data_root="data",
+    min_seconds=300,
+    dark_thresh=10.0,
+    diff_thresh=2.0,
+    dry_run=True,
+    force_keep_hourly=True,
+    auto_label_metar=True,
+):
     storage = ConfigLoader().get_storage(data_root)
     labels = load_labels(data_root)
 
-    image_keys = [k for k in storage.list_keys("") if k.endswith(".jpg") and k not in labels]
+    image_keys = [
+        k for k in storage.list_keys("") if k.endswith(".jpg") and k not in labels
+    ]
     image_keys.sort()  # Lexicographic == chronological for our key layout
     images = [(_mtime_from_key(k), k) for k in image_keys]
 
@@ -92,11 +105,14 @@ def prune_dataset(data_root="data", min_seconds=300, dark_thresh=10.0, diff_thre
             if metar_text:
                 try:
                     obs = Metar.Metar(metar_text)
-                    vis = obs.vis.value('SM') if obs.vis else 10.0
+                    vis = obs.vis.value("SM") if obs.vis else 10.0
                     ceil = 10000.0
                     if obs.sky:
-                        layers = [l for l in obs.sky if l[0] in ['BKN', 'OVC']]
-                        if layers: ceil = layers[0][1].value('FT')
+                        layers = [
+                            layer for layer in obs.sky if layer[0] in ["BKN", "OVC"]
+                        ]
+                        if layers:
+                            ceil = layers[0][1].value("FT")
 
                     # Vis crap OR ceiling below Rainier's peak area (~8000ft)
                     if vis < 3.0 or ceil < 6000:
@@ -104,7 +120,8 @@ def prune_dataset(data_root="data", min_seconds=300, dark_thresh=10.0, diff_thre
                             labels[img_key] = 0
                         reasons["metar_auto"] += 1
                         continue  # Auto-label, do not delete
-                except: pass
+                except Exception:
+                    pass
 
         # 2. Force Keep Logic (1 per hour for darkness baseline)
         dt = datetime.fromtimestamp(mtime, UTC)
@@ -116,7 +133,8 @@ def prune_dataset(data_root="data", min_seconds=300, dark_thresh=10.0, diff_thre
                 with _open_pil(storage, img_key) as img:
                     last_kept_img = img.convert("L").copy()
                 continue
-            except: pass
+            except Exception:
+                pass
 
         # 3. Temporal Pruning
         if mtime - last_kept_time < min_seconds:
@@ -191,5 +209,9 @@ if __name__ == "__main__":
     parser.add_argument("--diff", type=float, default=2.0)
     args = parser.parse_args()
 
-    prune_dataset(dry_run=not args.execute, min_seconds=args.min_sec,
-                  dark_thresh=args.dark, diff_thresh=args.diff)
+    prune_dataset(
+        dry_run=not args.execute,
+        min_seconds=args.min_sec,
+        dark_thresh=args.dark,
+        diff_thresh=args.diff,
+    )
