@@ -150,6 +150,7 @@ def batch(
     per_epoch: list[dict] = []
     uploaded_keys: list[str] = []
     best_epoch: int | None = None
+    best_val_acc: float | None = None
 
     def _write_summary(status: str, **extra) -> None:
         """Atomic (tmp+rename) summary write; a scheduled wrapper parses this
@@ -270,7 +271,11 @@ def batch(
             )
             prefetch_keys.append(str(img_p.parent.parent / "metar" / "metar.txt"))
             prefetch_keys.append(str(img_p.parent / f"{img_p.stem}.txt"))
+        prefetch_started = time.monotonic()
         storage.prefetch(prefetch_keys)
+        prefetch_s = round(time.monotonic() - prefetch_started, 1)
+    else:
+        prefetch_s = 0.0
 
     batch_size = 16
 
@@ -435,6 +440,7 @@ def batch(
         epoch_task = progress.add_task("[green]Epochs...", total=epochs)
 
         for epoch in range(epochs):
+            epoch_started = time.monotonic()
             random.shuffle(train_list)
             batch_task = progress.add_task(
                 f"[cyan]Epoch {epoch + 1}/{epochs}...", total=total_batches
@@ -563,12 +569,14 @@ def batch(
                     "train_loss": avg_loss,
                     "val_loss": val_loss,
                     "val_acc": val_acc,
+                    "duration_s": round(time.monotonic() - epoch_started, 1),
                 }
             )
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_epoch = epoch + 1
+                best_val_acc = val_acc
                 uploaded_keys = trainer.model_wrapper.save_checkpoint(
                     trainer.config_loader.checkpoint_dir, storage=storage
                 )
@@ -615,6 +623,8 @@ def batch(
         train_n=len(train_list),
         val_n=len(val_list),
         best_val_loss=best_val_loss,
+        best_val_acc=best_val_acc,
+        prefetch_s=prefetch_s,
     )
 
     print(

@@ -123,11 +123,40 @@ def _delta_text(best: float, previous: float | None) -> str:
     return f"{arrow} {abs(delta):.4f} vs last ({previous:.4f})"
 
 
+def _acc_delta_text(acc: float | None, previous: float | None) -> str:
+    """Accuracy improvement in percentage points (higher is better — arrows flip
+    relative to the loss delta)."""
+    if acc is None:
+        return "n/a"
+    if previous is None:
+        return f"{acc:.1%} — no previous run to compare"
+    delta_pt = (acc - previous) * 100
+    if abs(delta_pt) < 0.05:
+        return f"{acc:.1%} — unchanged vs last"
+    arrow = "▲ improved" if delta_pt > 0 else "▼ regressed"
+    return f"{acc:.1%} — {arrow} {abs(delta_pt):.1f}pt vs last ({previous:.1%})"
+
+
+def _duration_text(duration_s: float, summary: dict) -> str:
+    """Total wall time with the prefetch/epoch breakdown when the summary has it."""
+    parts = [f"{duration_s / 60:.0f} min total"]
+    prefetch_s = summary.get("prefetch_s")
+    if prefetch_s:
+        parts.append(f"prefetch {prefetch_s / 60:.1f} min")
+    epoch_times = [
+        e["duration_s"] for e in summary.get("per_epoch") or [] if e.get("duration_s")
+    ]
+    if epoch_times:
+        parts.append(f"~{sum(epoch_times) / len(epoch_times) / 60:.1f} min/epoch")
+    return " · ".join(parts)
+
+
 def result_embed(
     summary: dict,
     pending_n: int,
     previous_best: float | None,
     duration_s: float,
+    previous_best_acc: float | None = None,
 ) -> dict:
     counts = summary.get("class_counts", {})
     dataset = (
@@ -137,7 +166,13 @@ def result_embed(
     )
     best = summary.get("best_val_loss")
     best_epoch = summary.get("best_epoch")
-    last = (summary.get("per_epoch") or [{}])[-1]
+    per_epoch = summary.get("per_epoch") or [{}]
+    best_val_acc = summary.get("best_val_acc")
+    if best_val_acc is None:  # older summaries: recover from the best epoch's record
+        best_val_acc = next(
+            (e.get("val_acc") for e in per_epoch if e.get("epoch") == best_epoch), None
+        )
+    last = per_epoch[-1]
     uploaded = summary.get("checkpoint_keys_uploaded") or []
     checkpoint = (
         f"{len(uploaded)}/3 files → R2 (live on next container cold start)"
@@ -160,11 +195,20 @@ def result_embed(
                 "inline": False,
             },
             {
+                "name": "Val accuracy",
+                "value": _acc_delta_text(best_val_acc, previous_best_acc),
+                "inline": False,
+            },
+            {
                 "name": "Final epoch",
                 "value": f"val_acc {last.get('val_acc', 0.0):.1%} · train_loss {last.get('train_loss', 0.0):.4f}",
                 "inline": True,
             },
-            {"name": "Duration", "value": f"{duration_s / 60:.0f} min", "inline": True},
+            {
+                "name": "Duration",
+                "value": _duration_text(duration_s, summary),
+                "inline": True,
+            },
             {"name": "Checkpoint", "value": checkpoint, "inline": False},
         ],
         "footer": {"text": "is-the-mountain-out • scheduled training"},
@@ -342,11 +386,18 @@ def main(config: str, data_root: str, check: bool) -> None:
             "ran_at": started_at.isoformat(),
             "labels_total": summary.get("labels_loaded"),
             "best_val_loss": summary.get("best_val_loss"),
+            "best_val_acc": summary.get("best_val_acc"),
             "epochs": epochs,
         },
     )
     telemetry.update(
-        result_embed(summary, len(pending), watermark.get("best_val_loss"), duration_s)
+        result_embed(
+            summary,
+            len(pending),
+            watermark.get("best_val_loss"),
+            duration_s,
+            previous_best_acc=watermark.get("best_val_acc"),
+        )
     )
     print(
         f"run complete — best val_loss {summary.get('best_val_loss'):.4f}, "
