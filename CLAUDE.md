@@ -28,8 +28,13 @@ uv run collect live         # continuous collection loop
 uv run classify start [data_folder]
 uv run classify stop
 
+# Discord reaction-labeling bot (see BOT.md; discord.py lives in the `bot` dependency group)
+uv run --group bot bot run           # hourly daylight posts + reaction labeling
+uv run --group bot bot post-once     # one labelable post, then exit (setup check)
+
 # Nomad job management
 nomad job run nomad/collect.hcl          # start collector tray
+nomad job run nomad/bot.hcl              # start Discord labeling bot
 nomad job status mountain-collector      # check status
 nomad alloc logs <alloc-id>              # view logs
 nomad alloc logs -stderr <alloc-id>      # view error logs
@@ -63,6 +68,10 @@ Writes timestamped directories: `data/YYYYMMDD/HHMMSS_us_UTC/{images/,metar/}`. 
 ### Classification UI (`tools/classifier_server.py` + `ui/`)
 
 FastAPI server writes its port to `data/classifier_server.port` at startup (dynamic port allocation). The React app (`ui/src/App.tsx`) polls `/api/images` for unlabeled batches (60 images), supports drag-to-select, hotkeys `1/2/0` for Full/Partial/None, and submits via `/api/label`. The Vite base path is `/classify/`; the API server reverse-proxies at that path.
+
+### Discord labeling bot (`bot/`)
+
+Gateway bot (discord.py, `bot` dependency group) that posts an hourly daylight webcam capture to a Discord channel and records 👍/⛅/👎 reactions as Full/Partial/Not-Out labels — the mobile counterpart to the classifier UI. `bot/labeler.py` is pure logic (emoji normalization, capture-key footers, union-merge into the shared `labels.yaml`, solar posting window via astral); `bot/main.py` is the discord.py wiring (60s post loop, `on_raw_reaction_add`, startup sweep of missed reactions). Captures reuse `collect.collector.perform_capture`, so every posted frame lands in R2 under the standard key with paired METAR. See `BOT.md`.
 
 ### Configuration (`mountain.toml`)
 

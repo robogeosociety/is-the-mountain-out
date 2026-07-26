@@ -39,3 +39,15 @@ backend = "r2"
 r2_account_id = "d7adee58513c1b2f770ccaac90cf114f"
 r2_bucket = "is-the-mountain-out"
 cache_dir = ".r2cache"
+
+[bot]
+# Discord reaction-labeling bot (BOT.md). Secrets + channel/user ids live in
+# cf.env; this section is behavior tuning only.
+post_interval_seconds = 3600 # one labelable capture per hour
+sweep_hours = 72 # startup sweep re-reads this much channel history for missed reactions
+state_url = "" # public state.json URL; when set, posts include the model's live prediction
+timezone = "America/Los_Angeles"
+# Posting window defaults to civil dawn→dusk at the webcam's coordinates (astral).
+# Uncomment both to force a fixed local-time window instead:
+# window_start = "06:00"
+# window_end = "21:00"

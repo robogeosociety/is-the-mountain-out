@@ -19,6 +19,7 @@ import { notifyDiscordTest, notifyMountainVisibility } from "./discord-mountain-
 interface Env {
   INFERENCE_CONTAINER: DurableObjectNamespace<InferenceContainer>;
   STATE_BUCKET: R2Bucket;
+  CAPTURE_BUCKET: R2Bucket;
   R2_ACCESS_KEY_ID: string;
   R2_SECRET_ACCESS_KEY: string;
   // Discord webhook URL the Worker posts visibility transitions to. Optional so
@@ -96,18 +97,69 @@ async function getPreviousState(env: Env): Promise<PredictionState | null> {
   }
 }
 
+// METAR source for persisted transition captures — same NOAA endpoint and
+// station the collector's WeatherFetcher uses (mountain.toml [weather]).
+const METAR_URL = "https://tgftp.nws.noaa.gov/data/observations/metar/stations/KSEA.TXT";
+
+// Persist the frame (and METAR) a transition notification announces, under the
+// collector's standard capture-key layout, so a reaction on the notification
+// can label a real stored capture (the labeler bot gates on the key existing).
+// Returns the image key, or null on failure — the notification then falls back
+// to its prose footer and simply isn't labelable, mirroring today's behavior.
+async function persistTransitionCapture(env: Env, state: PredictionState): Promise<string | null> {
+  try {
+    const frameResp = await fetch(state.webcam_url);
+    if (!frameResp.ok) throw new Error(`webcam fetch returned ${frameResp.status}`);
+    const frame = await frameResp.arrayBuffer();
+
+    const now = new Date();
+    const pad = (n: number, width = 2) => String(n).padStart(width, "0");
+    const dateStr = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`;
+    const timeStr =
+      `${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}` +
+      `_${pad(now.getUTCMilliseconds() * 1000, 6)}_UTC`;
+    const captureDir = `${dateStr}/${timeStr}`;
+    const imageKey = `${captureDir}/images/${timeStr}_worker_transition.jpg`;
+
+    await env.CAPTURE_BUCKET.put(imageKey, frame, {
+      httpMetadata: { contentType: "image/jpeg" },
+    });
+
+    // METAR is best-effort: labeled samples want the paired weather vector,
+    // but a missing metar.txt must not cost us the labelable image.
+    try {
+      const metarResp = await fetch(METAR_URL);
+      if (metarResp.ok) {
+        const lines = (await metarResp.text()).trim().split("\n");
+        const metar = lines.length >= 2 ? lines[1] : lines[0];
+        await env.CAPTURE_BUCKET.put(`${captureDir}/metar/metar.txt`, metar, {
+          httpMetadata: { contentType: "text/plain" },
+        });
+      }
+    } catch (e) {
+      console.warn("transition METAR persist failed (image kept):", e);
+    }
+    return imageKey;
+  } catch (e) {
+    console.error("transition capture persist failed; notification will not be labelable:", e);
+    return null;
+  }
+}
+
 // Fire only on the Not Out → visible transition, mirroring tools/detect_mountain.py.
 async function notifyTransition(env: Env, prev: PredictionState | null, next: PredictionState): Promise<void> {
   if (!next.is_out) return;
   if (prev?.is_out) return;
   const visible = (next.confidence?.full ?? 0) + (next.confidence?.partial ?? 0);
   const label = next.class_name === "full" ? "Full" : "Partial";
+  const captureKey = await persistTransitionCapture(env, next);
   await notifyMountainVisibility(env, {
     visible: true,
     confidence: visible,
     label,
     imageUrl: next.webcam_url,
     timestamp: next.timestamp_utc,
+    captureKey: captureKey ?? undefined,
   });
 }
 

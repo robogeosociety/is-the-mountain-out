@@ -17,6 +17,10 @@ export interface PredictionResult {
   label: string; // "Full" | "Partial" | raw class name
   imageUrl?: string; // webcam snapshot to embed
   timestamp?: string; // ISO 8601; defaults to now
+  // R2 key of the persisted frame this notification announces. When set it
+  // becomes the embed footer verbatim — the contract the labeler bot parses so
+  // a 👍/⛅/👎 reaction on the notification records a training label.
+  captureKey?: string;
 }
 
 export interface Env {
@@ -74,7 +78,7 @@ async function postWebhook(env: Env, embed: DiscordEmbed, context: string): Prom
  * Returns true if the webhook was delivered successfully, false otherwise.
  */
 export async function notifyMountainVisibility(env: Env, result: PredictionResult): Promise<boolean> {
-  const { visible, confidence, label, imageUrl, timestamp } = result;
+  const { visible, confidence, label, imageUrl, timestamp, captureKey } = result;
   const confidencePct = (confidence * 100).toFixed(1);
   const ts = timestamp ?? new Date().toISOString();
 
@@ -85,7 +89,9 @@ export async function notifyMountainVisibility(env: Env, result: PredictionResul
       { name: "Confidence", value: `${confidencePct}%`, inline: true },
       { name: "Classification", value: label, inline: true },
     ],
-    footer: { text: "is-the-mountain-out • Automated prediction" },
+    // The capture key makes the notification labelable (react 👍/⛅/👎 to
+    // correct or confirm the model); prose footer = not labelable.
+    footer: { text: captureKey ?? "is-the-mountain-out • Automated prediction" },
     timestamp: ts,
   };
   if (imageUrl) {
