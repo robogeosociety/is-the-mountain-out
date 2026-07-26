@@ -28,7 +28,12 @@ the Gateway, which is why the Worker's webhook notifier can't do this job.
 3. You tap a reaction. The bot maps emoji → class, checks the allowlist, and
    union-merges `{capture_key: class}` into `labels.yaml` (R2 is the source of
    truth; the merge never deletes keys added by the classifier UI). Each label
-   also appends a provenance event to `labels/discord-events.jsonl`.
+   also appends a provenance event to `labels/discord-events.jsonl`, and the
+   bot **edits a 🏷️ Label field onto its post** as acknowledgment — e.g. "New
+   reaction (Not Out) recorded — 3/2004 training labels from Discord". Labels
+   count toward the *model* at the next `just train`. (Worker notification
+   messages record labels too but can't show the field — bots can't edit
+   webhook messages.)
 4. Re-labeling is just reacting again — last reaction wins. Reactions added
    while the bot was offline are recovered by a startup sweep of the last
    `sweep_hours` of channel history (majority vote; ties are skipped).

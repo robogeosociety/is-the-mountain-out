@@ -254,9 +254,22 @@ class TestRecordLabel:
 
     def test_creates_labels_file(self, tmp_path):
         store = LocalStorage(str(tmp_path))
-        merged = labeler.record_label(store, self.KEY, 1, user_id=111)
-        assert merged == {self.KEY: 1}
+        result = labeler.record_label(store, self.KEY, 1, user_id=111)
+        assert result.labels == {self.KEY: 1}
+        assert result.total == 1
+        assert result.discord_count == 1
         assert yaml.safe_load(store.get_text("labels.yaml")) == {self.KEY: 1}
+
+    def test_result_counts(self, tmp_path):
+        store = LocalStorage(str(tmp_path))
+        store.put_text("labels.yaml", yaml.safe_dump({"ui/images/a.jpg": 0}))
+        first = labeler.record_label(store, self.KEY, 1, user_id=111)
+        assert (first.total, first.discord_count) == (2, 1)
+        # Re-labeling the same capture doesn't inflate either count.
+        again = labeler.record_label(store, self.KEY, 0, user_id=111)
+        assert (again.total, again.discord_count) == (2, 1)
+        other = labeler.record_label(store, "other/images/b.jpg", 2, user_id=111)
+        assert (other.total, other.discord_count) == (3, 2)
 
     def test_union_merge_preserves_other_keys(self, tmp_path):
         store = LocalStorage(str(tmp_path))
@@ -293,6 +306,28 @@ class TestRecordLabel:
 
     def test_load_labels_missing_file(self, tmp_path):
         assert labeler.load_labels(LocalStorage(str(tmp_path))) == {}
+
+    def test_telemetry_field_text(self):
+        result = labeler.LabelResult(labels={}, total=2004, discord_count=3)
+        field = labeler.telemetry_field(0, result)
+        assert field["name"] == labeler.TELEMETRY_FIELD
+        assert (
+            field["value"]
+            == "New reaction (Not Out) recorded — 3/2004 training labels from Discord"
+        )
+
+    def test_apply_telemetry_appends_then_replaces(self):
+        embed = labeler.build_capture_embed(self.KEY, datetime(2026, 7, 26, tzinfo=UTC))
+        n_fields = len(embed["fields"])
+        result = labeler.LabelResult(labels={}, total=10, discord_count=1)
+        once = labeler.apply_telemetry(embed, labeler.telemetry_field(1, result))
+        assert len(once["fields"]) == n_fields + 1
+        # Re-label: the field is replaced in place, not stacked.
+        twice = labeler.apply_telemetry(once, labeler.telemetry_field(0, result))
+        assert len(twice["fields"]) == n_fields + 1
+        assert "Not Out" in twice["fields"][-1]["value"]
+        # Original legend field and footer survive edits.
+        assert twice["footer"]["text"] == self.KEY
 
     def test_uncached_storage_unwraps_cache(self, tmp_path):
         class FakeCached:
