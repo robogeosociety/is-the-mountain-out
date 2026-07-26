@@ -5,7 +5,8 @@ mirroring collect/tests/test_storage.py.
 """
 
 import json
-from datetime import UTC, datetime, time as dtime
+from datetime import UTC, datetime
+from datetime import time as dtime
 from unittest.mock import patch
 
 import pytest
@@ -15,7 +16,6 @@ import yaml
 from bot import labeler
 from bot.labeler import BotSettings
 from collect.storage import LocalStorage
-
 
 # ---------- Emoji normalization + mapping ----------
 
@@ -67,12 +67,20 @@ class TestFooter:
     def test_strips_whitespace(self):
         assert labeler.capture_key_from_footer(f"  {self.KEY} ") == self.KEY
 
+    def test_worker_transition_key_parses(self):
+        # The key shape persistTransitionCapture (worker/src/index.ts) writes —
+        # a regex drift here would silently make notifications unlabelable.
+        key = (
+            "20260725/133055_787000_UTC/images/133055_787000_UTC_worker_transition.jpg"
+        )
+        assert labeler.capture_key_from_footer(key) == key
+
     @pytest.mark.parametrize(
         "text",
         [
             None,
             "",
-            "is-the-mountain-out • Automated prediction",  # Worker webhook footer
+            "is-the-mountain-out • Automated prediction",  # legacy prose footer
             "20260701/143000_UTC/images/x.jpg",  # missing microseconds
             "20260701/143000_123456_UTC/metar/metar.txt",  # not an image
             "../../etc/passwd",
@@ -133,14 +141,14 @@ class TestBotSettings:
 
 
 def _settings(**overrides) -> BotSettings:
-    base = dict(
-        token="t",
-        channel_id=1,
-        allowed_user_ids=frozenset(),
-        latitude=47.6533,
-        longitude=-122.3091,
-        timezone="America/Los_Angeles",
-    )
+    base = {
+        "token": "t",
+        "channel_id": 1,
+        "allowed_user_ids": frozenset(),
+        "latitude": 47.6533,
+        "longitude": -122.3091,
+        "timezone": "America/Los_Angeles",
+    }
     base.update(overrides)
     return BotSettings(**base)
 

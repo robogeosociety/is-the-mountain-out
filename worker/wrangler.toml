@@ -31,3 +31,11 @@ bindings = [
 [[r2_buckets]]
 binding = "STATE_BUCKET"
 bucket_name = "is-the-mountain-out-public"
+
+# Private captures bucket. On a visibility transition the Worker persists the
+# announced frame (+ METAR) here under a standard capture key and footers the
+# notification with it, so a 👍/⛅/👎 reaction on the notification can become a
+# training label (see BOT.md in the repo root).
+[[r2_buckets]]
+binding = "CAPTURE_BUCKET"
+bucket_name = "is-the-mountain-out"

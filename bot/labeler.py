@@ -13,9 +13,11 @@ import json
 import logging
 import os
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, time as dtime
-from typing import Any, Iterable, Mapping, Optional
+from datetime import UTC, datetime
+from datetime import time as dtime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
@@ -62,7 +64,7 @@ def normalize_emoji(emoji: str) -> str:
     )
 
 
-def class_for_emoji(emoji: str) -> Optional[int]:
+def class_for_emoji(emoji: str) -> int | None:
     """Label class for a reaction emoji, or None if it isn't a label emoji."""
     return EMOJI_TO_CLASS.get(normalize_emoji(emoji))
 
@@ -75,17 +77,20 @@ def reaction_legend() -> str:
 
 # ---------- Message ↔ capture mapping ----------
 #
-# The embed footer carries the capture's storage key verbatim. It is the only
-# message↔capture state, so labeling survives restarts with nothing on disk,
-# and foreign messages in the channel (e.g. the Worker's webhook notifications,
-# whose footers are prose) can never parse as a capture.
+# The embed footer carries the capture's storage key verbatim — on the bot's
+# own hourly posts AND on the Worker's transition notifications, which persist
+# the frame they announce and footer its key (worker/src/index.ts). It is the
+# only message↔capture state, so labeling survives restarts with nothing on
+# disk. Prose footers (historical notifications, anything else) never parse as
+# a capture, and the wiring additionally gates parsed keys on existing in
+# storage before recording a label.
 
 
 def footer_for_capture(capture_key: str) -> str:
     return capture_key
 
 
-def capture_key_from_footer(text: Optional[str]) -> Optional[str]:
+def capture_key_from_footer(text: str | None) -> str | None:
     if not text:
         return None
     text = text.strip()
@@ -103,8 +108,8 @@ class BotSettings:
     post_interval_seconds: int = 3600
     sweep_hours: int = 72
     state_url: str = ""
-    window_start: Optional[dtime] = None  # fixed window; overrides solar
-    window_end: Optional[dtime] = None
+    window_start: dtime | None = None  # fixed window; overrides solar
+    window_end: dtime | None = None
     timezone: str = "America/Los_Angeles"
     latitude: float = 0.0
     longitude: float = 0.0
@@ -112,7 +117,7 @@ class BotSettings:
     @classmethod
     def from_mapping(
         cls, config: Mapping[str, Any], env: Mapping[str, str] | None = None
-    ) -> "BotSettings":
+    ) -> BotSettings:
         """Build settings from the mountain.toml data dict + environment.
 
         Secrets and per-deployment ids come from the environment (cf.env);
@@ -136,7 +141,7 @@ class BotSettings:
             int(part) for part in re.split(r"[,\s]+", allowed_raw) if part
         )
 
-        def parse_window(key: str) -> Optional[dtime]:
+        def parse_window(key: str) -> dtime | None:
             raw = bot_cfg.get(key)
             return dtime.fromisoformat(raw) if raw else None
 
@@ -159,7 +164,7 @@ class BotSettings:
 
 
 def next_post_due(
-    last_post: Optional[datetime], now: datetime, interval_seconds: int
+    last_post: datetime | None, now: datetime, interval_seconds: int
 ) -> bool:
     return last_post is None or (now - last_post).total_seconds() >= interval_seconds
 
@@ -186,7 +191,7 @@ def in_daylight_window(settings: BotSettings, now: datetime) -> bool:
 # ---------- Prediction context (public state.json) ----------
 
 
-def fetch_prediction(state_url: str, timeout: float = 10.0) -> Optional[dict]:
+def fetch_prediction(state_url: str, timeout: float = 10.0) -> dict | None:
     """Fetch the Worker-published PredictionState, or None (never raises)."""
     if not state_url:
         return None
@@ -205,7 +210,7 @@ def fetch_prediction(state_url: str, timeout: float = 10.0) -> Optional[dict]:
 def build_capture_embed(
     capture_key: str,
     captured_at: datetime,
-    prediction: Optional[Mapping[str, Any]] = None,
+    prediction: Mapping[str, Any] | None = None,
 ) -> dict:
     """Embed dict (discord.Embed.from_dict shape) for a labelable capture post.
 
@@ -246,7 +251,7 @@ def load_labels(storage, labels_key: str = LABELS_KEY) -> dict:
     """Current labels from storage; empty dict when absent/unreadable."""
     try:
         return yaml.safe_load(storage.get_text(labels_key)) or {}
-    except Exception:
+    except Exception:  # noqa: BLE001 — backend-specific miss/IO errors all mean "no labels yet"
         return {}
 
 
@@ -259,7 +264,7 @@ def record_label(
     source: str = "discord-reaction",
     labels_key: str = LABELS_KEY,
     events_key: str = EVENTS_KEY,
-    now: Optional[datetime] = None,
+    now: datetime | None = None,
 ) -> dict:
     """Merge {capture_key: label} into labels.yaml and append a provenance event.
 
@@ -281,7 +286,7 @@ def record_label(
     }
     try:
         existing = storage.get_text(events_key)
-    except Exception:
+    except Exception:  # noqa: BLE001 — backend-specific miss/IO errors all mean "no log yet"
         existing = ""
     storage.put_text(events_key, existing + json.dumps(event) + "\n")
     return labels
@@ -299,7 +304,7 @@ def labeler_allowed(user_id: int, is_bot: bool, allowed: frozenset[int]) -> bool
 
 def label_from_reaction_users(
     reaction_users: Mapping[str, Iterable[int]], allowed: frozenset[int]
-) -> Optional[int]:
+) -> int | None:
     """Resolve a message's accumulated reactions to one label (startup sweep).
 
     *reaction_users* maps emoji → non-bot user ids currently reacted. Majority

@@ -3,6 +3,9 @@
 Posts a fresh webcam capture to one Discord channel on an hourly daylight
 schedule, seeds the 👍/⛅/👎 label reactions, and records human reactions into
 the same labels.yaml the classifier UI and `training batch` already share.
+Reactions on the Worker's transition notifications count too — the Worker
+persists the announced frame and footers its capture key — so a 👎 on a false
+"the mountain is out!" is a training label against the exact offending frame.
 Reactions added while the bot was down are recovered by a startup sweep of
 recent channel history.
 
@@ -17,7 +20,6 @@ import logging
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 import click
 import discord
@@ -50,7 +52,7 @@ class MountainBot(discord.Client):
         self.post_once = post_once
         self.storage = config_loader.get_storage(data_root)
         self.weather = WeatherFetcher(config_loader.metar_station)
-        self._last_post: Optional[datetime] = None
+        self._last_post: datetime | None = None
         self._swept = False
 
     async def setup_hook(self) -> None:
@@ -96,7 +98,7 @@ class MountainBot(discord.Client):
     async def _wait_until_ready(self) -> None:
         await self.wait_until_ready()
 
-    def _capture(self) -> Optional[tuple[str, bytes, datetime]]:
+    def _capture(self) -> tuple[str, bytes, datetime] | None:
         """Blocking capture → (storage key, jpeg bytes, captured_at)."""
         remote = self.storage if self.config_loader.storage_backend == "r2" else None
         image_path = perform_capture(
@@ -162,6 +164,9 @@ class MountainBot(discord.Client):
         key = await self._capture_key_for_message(payload.message_id)
         if key is None:
             return
+        if not await asyncio.to_thread(self.storage.exists, key):
+            logger.warning(f"reaction on {key} ignored: capture not in storage")
+            return
         await asyncio.to_thread(
             labeler.record_label, self.storage, key, cls, user_id=payload.user_id
         )
@@ -169,13 +174,17 @@ class MountainBot(discord.Client):
             f"labeled {key} = {cls} ({labeler.CLASS_NAMES[cls]}) by user {payload.user_id}"
         )
 
-    async def _capture_key_for_message(self, message_id: int) -> Optional[str]:
+    async def _capture_key_for_message(self, message_id: int) -> str | None:
         channel = await self._channel()
         try:
             message = await channel.fetch_message(message_id)
         except discord.HTTPException:
             return None
-        if not self.user or message.author.id != self.user.id or not message.embeds:
+        # Labelable messages come from automation: the bot's own posts and the
+        # Worker's transition notifications (webhook authors are bots too).
+        # Human-authored embeds never count; the footer regex plus the caller's
+        # storage-existence gate keep arbitrary keys out of labels.yaml.
+        if not message.author.bot or not message.embeds:
             return None
         footer = message.embeds[0].footer
         return labeler.capture_key_from_footer(footer.text if footer else None)
@@ -187,11 +196,15 @@ class MountainBot(discord.Client):
         current = await asyncio.to_thread(labeler.load_labels, self.storage)
         swept = 0
         async for message in channel.history(limit=500, after=after):
-            if not self.user or message.author.id != self.user.id or not message.embeds:
+            # Same acceptance rule as _capture_key_for_message: any bot-authored
+            # embed (own posts + Worker notifications) with a parsing footer.
+            if not message.author.bot or not message.embeds:
                 continue
             footer = message.embeds[0].footer
             key = labeler.capture_key_from_footer(footer.text if footer else None)
             if key is None:
+                continue
+            if not await asyncio.to_thread(self.storage.exists, key):
                 continue
             reaction_users: dict[str, list[int]] = {}
             for reaction in message.reactions:
@@ -222,9 +235,7 @@ class MountainBot(discord.Client):
 # ---------- CLI ----------
 
 
-def _build(
-    config: str, data_root: Optional[str], post_once: bool = False
-) -> MountainBot:
+def _build(config: str, data_root: str | None, post_once: bool = False) -> MountainBot:
     loader = ConfigLoader(config)
     root = data_root or os.environ.get("MOUNTAIN_DATA_ROOT", "data")
     try:
@@ -248,7 +259,7 @@ def cli() -> None:
 @click.option(
     "--data-root", default=None, help="Defaults to $MOUNTAIN_DATA_ROOT or 'data'."
 )
-def run(config: str, data_root: Optional[str]) -> None:
+def run(config: str, data_root: str | None) -> None:
     """Run the bot: hourly daylight capture posts + reaction labeling."""
     bot = _build(config, data_root)
     bot.run(bot.settings.token, log_handler=None)
@@ -259,7 +270,7 @@ def run(config: str, data_root: Optional[str]) -> None:
 @click.option(
     "--data-root", default=None, help="Defaults to $MOUNTAIN_DATA_ROOT or 'data'."
 )
-def post_once(config: str, data_root: Optional[str]) -> None:
+def post_once(config: str, data_root: str | None) -> None:
     """Capture and post a single labelable message, then exit (setup check)."""
     bot = _build(config, data_root, post_once=True)
     bot.run(bot.settings.token, log_handler=None)

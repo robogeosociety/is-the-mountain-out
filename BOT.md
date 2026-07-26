@@ -32,7 +32,14 @@ the Gateway, which is why the Worker's webhook notifier can't do this job.
 4. Re-labeling is just reacting again — last reaction wins. Reactions added
    while the bot was offline are recovered by a startup sweep of the last
    `sweep_hours` of channel history (majority vote; ties are skipped).
-5. Next `just train` folds the Discord labels into the oversampled batch run
+5. **The Worker's "mountain is out!" notifications are labelable too.** On a
+   visibility transition the Worker persists the announced frame (+ METAR) to
+   R2 under a standard capture key and footers the notification with it
+   (`worker/src/index.ts`). The bot treats any *bot-authored* embed whose
+   footer parses as a capture key — and whose key actually exists in storage —
+   exactly like its own posts. A 👎 on a false positive is the highest-value
+   label this system can collect (precision is the stated priority).
+6. Next `just train` folds the Discord labels into the oversampled batch run
    like any others.
 
 ## Setup (once)
@@ -53,9 +60,10 @@ the Gateway, which is why the Worker's webhook notifier can't do this job.
    (`post_interval_seconds`, `sweep_hours`, `state_url`, fixed
    `window_start`/`window_end` overriding the solar window).
 
-The channel can be the same one the Worker's webhook notifications post to —
-the sweep and reaction handler ignore any message that isn't the bot's own
-labelable capture (foreign footers never parse as capture keys).
+Point `DISCORD_CHANNEL_ID` at the same channel the Worker's webhook
+notifications post to (`#mountain`) — that's what makes notification reactions
+labelable. Messages that aren't bot-authored embeds with a real capture-key
+footer (older prose-footer notifications, human messages) are ignored.
 
 ## Run
 
