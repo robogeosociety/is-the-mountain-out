@@ -247,6 +247,17 @@ def build_capture_embed(
 # ---------- Label recording ----------
 
 
+def uncached_storage(storage):
+    """Unwrap CachedR2Storage to its raw R2 client for the bot's use.
+
+    The training cache serves stale reads by design; a label merge that starts
+    from a stale labels.yaml would silently drop labels other surfaces added to
+    R2 since the cache was warmed. The bot never benefits from cached reads, so
+    it always talks to the raw backend (same StorageBackend interface).
+    """
+    return getattr(storage, "r2", storage)
+
+
 def load_labels(storage, labels_key: str = LABELS_KEY) -> dict:
     """Current labels from storage; empty dict when absent/unreadable."""
     try:
