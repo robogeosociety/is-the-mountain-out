@@ -246,3 +246,12 @@ worker/.wrangler/
 
 # Local runner secrets
 local-runner/.env
+
+# Live checkpoint weights are NOT tracked — R2 `checkpoints/` is the source of
+# truth (the weekly scheduled run rewrites these on the mini; committing them
+# caused pull conflicts and stale-weights drift). `load_checkpoint` pulls from
+# R2 when the local copy is missing. Archived checkpoints_v1_binary/ etc. stay
+# tracked as history.
+train/checkpoints/adapter_config.json
+train/checkpoints/adapter_model.safetensors
+train/checkpoints/classifier.pt

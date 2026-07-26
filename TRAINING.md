@@ -48,4 +48,8 @@ the mountain-specific instance.
    `ConfigLoader.checkpoint_dir`) and uploaded to R2 for the inference container to
    pull on cold start. See `CHECKPOINTS.md` for model history.
 
-4. **Weights and training data stay out of git** (see `.gitignore`).
+4. **Weights and training data stay out of git** (see `.gitignore`). True in
+   full since 2026-07-26 — the live `train/checkpoints/` weights were
+   previously tracked, which dirtied the mini's checkout on every scheduled
+   run and let the committed copy drift stale; R2 `checkpoints/` is the single
+   source of truth and `load_checkpoint` falls back to it.

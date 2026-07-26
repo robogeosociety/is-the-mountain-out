@@ -1,10 +1,19 @@
+import os
+from pathlib import Path
+
+import cv2
 import pytest
 import torch
-import cv2
-from pathlib import Path
 from torchvision import transforms
-from train.model import ConvNextLoRAModel
+
 from train.config_loader import ConfigLoader
+from train.model import ConvNextLoRAModel
+
+# Trained weights are no longer committed (R2 `checkpoints/` is the source of
+# truth — see CHECKPOINTS.md). These tests need a real checkpoint: a local one
+# in train/checkpoints/ (dev machines, the mini), or R2 credentials to pull it.
+_LOCAL_CHECKPOINT = Path("train/checkpoints/classifier.pt")
+_HAS_R2_CREDS = bool(os.environ.get("R2_ACCESS_KEY_ID"))
 
 
 class RegressionTester:
@@ -13,9 +22,10 @@ class RegressionTester:
         self.device = torch.device(
             "mps" if torch.backends.mps.is_available() else "cpu"
         )
-        self.model = ConvNextLoRAModel(checkpoint_dir=self.config.checkpoint_dir).to(
-            self.device
-        )
+        storage = self.config.get_storage("data") if _HAS_R2_CREDS else None
+        self.model = ConvNextLoRAModel(
+            checkpoint_dir=self.config.checkpoint_dir, storage=storage
+        ).to(self.device)
         self.model.eval()
 
         self.transform = transforms.Compose(
@@ -46,6 +56,11 @@ class RegressionTester:
 
 @pytest.fixture(scope="module")
 def tester():
+    if not _LOCAL_CHECKPOINT.exists() and not _HAS_R2_CREDS:
+        pytest.skip(
+            "regression tests need trained weights: no local train/checkpoints/ "
+            "and no R2 credentials to pull them (source cf.env)"
+        )
     return RegressionTester()
 
 
@@ -67,13 +82,20 @@ def test_dark_frame_prediction(tester):
 
 def test_known_out_frame(tester):
     """
-    Case: Confirmed mountain visible frame.
-    Human Label: 1 (Mountain is Out)
-    Source: assets/regression_samples/mountain_out_sample.jpg
+    Case: Confirmed mountain-VISIBLE frame (binary-era sample, 2026-02-22).
+
+    This frame was hand-labeled "1 (Mountain is Out)" under the original BINARY
+    taxonomy. The 2026-03-14 reclassification (CHECKPOINTS.md) split "Out" into
+    Full/Partial, and this frame — heavy overcast with the range only peeking
+    through a horizon strip — is a textbook Partial under the current labels;
+    every 3-class checkpoint since has predicted 2 for it. The contract this
+    sample actually encodes is "a known-visible frame must never be called
+    Not Out", so assert visibility, not Full.
     """
     img_path = Path("assets/regression_samples/mountain_out_sample.jpg")
     prediction = tester.predict(img_path, vis=1.0, ceil=1.0)
 
-    assert prediction == 1, (
-        f"Model failed to identify known mountain-out frame. Predicted: {prediction}"
+    assert prediction in (1, 2), (
+        f"Model failed to see the mountain in a known-visible frame. "
+        f"Predicted: {prediction} (Not Out)"
     )

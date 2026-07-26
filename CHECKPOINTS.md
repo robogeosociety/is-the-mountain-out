@@ -16,7 +16,7 @@ This document catalogs the major model checkpoints saved during the project's de
 - **Architecture:** 2-Class Binary
 - **Status:** Archived. This was the final state of the binary model weights immediately prior to the dataset reclassification into 3 classes.
 
-### 3. `train/checkpoints` (Current Phase 2 Baseline)
+### 3. `train/checkpoints` (Phase 2 Baseline)
 - **Date:** March 14, 2026
 - **Architecture:** 3-Class (Not Out, Full, Partial)
 - **Dataset:** 1,319 images (Phase 1 re-labeled)
@@ -24,7 +24,20 @@ This document catalogs the major model checkpoints saved during the project's de
   - Full: 8 (0.6%)
   - Partial: 57 (4.3%)
 - **Strategy:** Fresh ConvNeXt weights fine-tuned with 78x oversampling on "Full" and 11x on "Partial".
-- **Status:** Active Baseline.
+- **Status:** Superseded by the scheduled-run era (below).
+
+### 4. R2 `checkpoints/` (Live — scheduled-run era, 2026-07-26 →)
+- **Weights left git on 2026-07-26.** The live checkpoint is the R2
+  `checkpoints/` object set, rewritten by the weekly supervisor-scheduled
+  retrain (`TRAINING.md`); `train/checkpoints/` is an untracked local working
+  copy, and `load_checkpoint` pulls from R2 when it's missing. Committing the
+  binaries had two failure modes: the mini's checkout went permanently dirty
+  after every scheduled run, and the committed copy silently drifted stale
+  behind the model actually serving.
+- **First scheduled run (2026-07-26):** 2,002 labels (1,729/109/164) incl. the
+  first Discord reaction labels, 5 epochs — val_loss **0.0205**, val_acc
+  **99.4%**, Full precision 0.88 → **0.98**. Run history from here lives in
+  the #mountain training embeds and `labels/train-watermark.json`.
 
 ## Future Expectations
 
