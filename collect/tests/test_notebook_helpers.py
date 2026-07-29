@@ -7,7 +7,6 @@ import yaml
 
 from collect.notebook_helpers import CaptureBrowser, load_labels, save_labels
 
-
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
