@@ -1,13 +1,20 @@
 """Discord reaction-labeling bot — gateway wiring around bot/labeler.py.
 
-Posts a fresh webcam capture to one Discord channel on an hourly daylight
-schedule, seeds the 👍/⛅/👎 label reactions, and records human reactions into
-the same labels.yaml the classifier UI and `training batch` already share.
-Reactions on the Worker's transition notifications count too — the Worker
-persists the announced frame and footers its capture key — so a 👎 on a false
-"the mountain is out!" is a training label against the exact offending frame.
-Reactions added while the bot was down are recovered by a startup sweep of
-recent channel history.
+Harvests 👍/⛅/👎 reactions on the Worker's visibility-change notifications into
+the same labels.yaml the classifier UI and `training batch` already share, so a
+👎 on a false "the mountain is out!" is a training label against the exact
+offending frame. Reactions added while the bot was down are recovered by a
+startup sweep of recent channel history.
+
+The bot does NOT post on a schedule. It used to publish an hourly capture to
+label, which produced 24 near-identical "Not Out (100.0%)" quiz posts a day —
+noise that buried the notifications that actually mean something. The Worker's
+state-change posts are now the whole labeling surface, and the Worker writes
+them with THIS bot's token (worker/src/discord-mountain-notify.ts) so they are
+bot-authored: without the privileged Message Content intent, Discord blanks the
+embeds of messages any other author wrote, which is exactly why reactions on
+the old webhook notifications were silently dropped. `bot post-once` remains as
+a manual setup check.
 
 Requires the `bot` dependency group:  uv run --group bot bot run
 """
@@ -23,7 +30,6 @@ from pathlib import Path
 
 import click
 import discord
-from discord.ext import tasks
 
 from bot import labeler
 from collect.collector import WeatherFetcher, perform_capture
@@ -33,7 +39,7 @@ logger = logging.getLogger("mountain.bot")
 
 
 class MountainBot(discord.Client):
-    """One channel, two jobs: post labelable captures, harvest reactions."""
+    """One channel, one job: turn reactions into training labels."""
 
     def __init__(
         self,
@@ -43,8 +49,11 @@ class MountainBot(discord.Client):
         post_once: bool = False,
     ):
         # Default (non-privileged) intents cover guilds + reactions. The
-        # message_content intent is NOT needed: the bot only reads embeds of
-        # its own messages, which Discord always delivers in full.
+        # message_content intent is NOT needed *because* every labelable post is
+        # written with this bot's token, and Discord always delivers a bot its
+        # own messages in full. Anything authored elsewhere arrives with
+        # `embeds: []`, which is precisely why the old webhook notifications
+        # were unlabelable — keep that invariant when adding a posting surface.
         super().__init__(intents=discord.Intents.default())
         self.settings = settings
         self.config_loader = config_loader
@@ -54,12 +63,7 @@ class MountainBot(discord.Client):
         # as a merge base would drop labels added to R2 by other surfaces.
         self.storage = labeler.uncached_storage(config_loader.get_storage(data_root))
         self.weather = WeatherFetcher(config_loader.metar_station)
-        self._last_post: datetime | None = None
         self._swept = False
-
-    async def setup_hook(self) -> None:
-        if not self.post_once:
-            self.post_loop.start()
 
     async def on_ready(self) -> None:
         logger.info(
@@ -79,26 +83,7 @@ class MountainBot(discord.Client):
             except Exception:
                 logger.exception("startup reaction sweep failed (continuing)")
 
-    # ---------- Posting ----------
-
-    @tasks.loop(seconds=60)
-    async def post_loop(self) -> None:
-        now = datetime.now(UTC)
-        if not labeler.next_post_due(
-            self._last_post, now, self.settings.post_interval_seconds
-        ):
-            return
-        if not labeler.in_daylight_window(self.settings, now):
-            return
-        try:
-            if await self.post_capture():
-                self._last_post = now
-        except Exception:
-            logger.exception("capture post failed (loop continues)")
-
-    @post_loop.before_loop
-    async def _wait_until_ready(self) -> None:
-        await self.wait_until_ready()
+    # ---------- Posting (manual setup check only — see module docstring) ----------
 
     def _capture(self) -> tuple[str, bytes, datetime] | None:
         """Blocking capture → (storage key, jpeg bytes, captured_at)."""
@@ -183,9 +168,9 @@ class MountainBot(discord.Client):
     ) -> None:
         """Acknowledge a recorded label on the post itself (edit-in-place).
 
-        Only the bot's own messages are editable — reactions on the Worker's
-        webhook notifications still record, they just can't show the field.
-        Best-effort: an edit failure never loses the already-recorded label.
+        Discord only lets a bot edit its own messages — which now includes the
+        Worker's notifications, since the Worker posts them with this bot's
+        token. Best-effort: an edit failure never loses the recorded label.
         """
         if not self.user or message.author.id != self.user.id or not message.embeds:
             return
@@ -205,10 +190,12 @@ class MountainBot(discord.Client):
             message = await channel.fetch_message(message_id)
         except discord.HTTPException:
             return None
-        # Labelable messages come from automation: the bot's own posts and the
-        # Worker's transition notifications (webhook authors are bots too).
-        # Human-authored embeds never count; the footer regex plus the caller's
-        # storage-existence gate keep arbitrary keys out of labels.yaml.
+        # Labelable messages come from automation: the Worker's visibility
+        # notifications and `bot post-once` captures, both written with this
+        # bot's token. Human-authored embeds never count; the footer regex plus
+        # the caller's storage-existence gate keep arbitrary keys out of
+        # labels.yaml. (`message.embeds` is only ever populated for messages
+        # this bot authored — see the module docstring on Message Content.)
         if not message.author.bot or not message.embeds:
             return None
         footer = message.embeds[0].footer
@@ -224,8 +211,8 @@ class MountainBot(discord.Client):
         current = await asyncio.to_thread(labeler.load_labels, self.storage)
         swept = 0
         async for message in channel.history(limit=500, after=after):
-            # Same acceptance rule as _capture_key_for_message: any bot-authored
-            # embed (own posts + Worker notifications) with a parsing footer.
+            # Same acceptance rule as _labelable_message: a bot-authored embed
+            # with a footer that parses as a capture key.
             if not message.author.bot or not message.embeds:
                 continue
             footer = message.embeds[0].footer
@@ -289,7 +276,7 @@ def cli() -> None:
     "--data-root", default=None, help="Defaults to $MOUNTAIN_DATA_ROOT or 'data'."
 )
 def run(config: str, data_root: str | None) -> None:
-    """Run the bot: hourly daylight capture posts + reaction labeling."""
+    """Run the bot: reaction labeling + startup sweep of missed reactions."""
     bot = _build(config, data_root)
     bot.run(bot.settings.token, log_handler=None)
 

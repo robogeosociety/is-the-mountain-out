@@ -16,9 +16,7 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from datetime import time as dtime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import requests
 import yaml
@@ -80,13 +78,13 @@ def reaction_legend() -> str:
 
 # ---------- Message ↔ capture mapping ----------
 #
-# The embed footer carries the capture's storage key verbatim — on the bot's
-# own hourly posts AND on the Worker's transition notifications, which persist
-# the frame they announce and footer its key (worker/src/index.ts). It is the
-# only message↔capture state, so labeling survives restarts with nothing on
-# disk. Prose footers (historical notifications, anything else) never parse as
-# a capture, and the wiring additionally gates parsed keys on existing in
-# storage before recording a label.
+# The embed footer carries the capture's storage key verbatim. The Worker's
+# visibility notifications persist the frame they announce and footer its key
+# (worker/src/index.ts), and `bot post-once` does the same. It is the only
+# message↔capture state, so labeling survives restarts with nothing on disk.
+# Prose footers (historical notifications, anything else) never parse as a
+# capture, and the wiring additionally gates parsed keys on existing in storage
+# before recording a label.
 
 
 def footer_for_capture(capture_key: str) -> str:
@@ -108,14 +106,8 @@ class BotSettings:
     token: str
     channel_id: int
     allowed_user_ids: frozenset[int]  # empty → any human reaction counts
-    post_interval_seconds: int = 3600
     sweep_hours: int = 72
     state_url: str = ""
-    window_start: dtime | None = None  # fixed window; overrides solar
-    window_end: dtime | None = None
-    timezone: str = "America/Los_Angeles"
-    latitude: float = 0.0
-    longitude: float = 0.0
 
     @classmethod
     def from_mapping(
@@ -129,7 +121,6 @@ class BotSettings:
         """
         env = os.environ if env is None else env
         bot_cfg = config.get("bot", {})
-        webcam = config.get("webcam", {})
 
         token = env.get("DISCORD_BOT_TOKEN", "").strip()
         channel_raw = env.get("DISCORD_CHANNEL_ID", "").strip()
@@ -144,51 +135,13 @@ class BotSettings:
             int(part) for part in re.split(r"[,\s]+", allowed_raw) if part
         )
 
-        def parse_window(key: str) -> dtime | None:
-            raw = bot_cfg.get(key)
-            return dtime.fromisoformat(raw) if raw else None
-
         return cls(
             token=token,
             channel_id=int(channel_raw),
             allowed_user_ids=allowed,
-            post_interval_seconds=int(bot_cfg.get("post_interval_seconds", 3600)),
             sweep_hours=int(bot_cfg.get("sweep_hours", 72)),
             state_url=str(bot_cfg.get("state_url", "")),
-            window_start=parse_window("window_start"),
-            window_end=parse_window("window_end"),
-            timezone=str(bot_cfg.get("timezone", "America/Los_Angeles")),
-            latitude=float(webcam.get("latitude", 0.0)),
-            longitude=float(webcam.get("longitude", 0.0)),
         )
-
-
-# ---------- Posting schedule ----------
-
-
-def next_post_due(
-    last_post: datetime | None, now: datetime, interval_seconds: int
-) -> bool:
-    return last_post is None or (now - last_post).total_seconds() >= interval_seconds
-
-
-def in_daylight_window(settings: BotSettings, now: datetime) -> bool:
-    """True when *now* falls inside the posting window.
-
-    A fixed [bot] window_start/window_end pair wins when configured; otherwise
-    the window is civil dawn→dusk at the webcam's coordinates (astral — the
-    same library behind `collect schedule`'s solar-aligned capture plans).
-    """
-    local = now.astimezone(ZoneInfo(settings.timezone))
-    if settings.window_start is not None and settings.window_end is not None:
-        return settings.window_start <= local.time() <= settings.window_end
-
-    from astral import Observer
-    from astral.sun import sun
-
-    observer = Observer(latitude=settings.latitude, longitude=settings.longitude)
-    times = sun(observer, date=local.date(), tzinfo=local.tzinfo)
-    return times["dawn"] <= local <= times["dusk"]
 
 
 # ---------- Prediction context (public state.json) ----------
