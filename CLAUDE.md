@@ -29,7 +29,7 @@ uv run classify start [data_folder]
 uv run classify stop
 
 # Discord reaction-labeling bot (see BOT.md; discord.py lives in the `bot` dependency group)
-uv run --group bot bot run           # hourly daylight posts + reaction labeling
+uv run --group bot bot run           # reaction labeling + startup sweep
 uv run --group bot bot post-once     # one labelable post, then exit (setup check)
 
 # Nomad job management
@@ -71,7 +71,7 @@ FastAPI server writes its port to `data/classifier_server.port` at startup (dyna
 
 ### Discord labeling bot (`bot/`)
 
-Gateway bot (discord.py, `bot` dependency group) that posts an hourly daylight webcam capture to a Discord channel and records 👍/⛅/👎 reactions as Full/Partial/Not-Out labels — the mobile counterpart to the classifier UI. `bot/labeler.py` is pure logic (emoji normalization, capture-key footers, union-merge into the shared `labels.yaml`, solar posting window via astral); `bot/main.py` is the discord.py wiring (60s post loop, `on_raw_reaction_add`, startup sweep of missed reactions). Captures reuse `collect.collector.perform_capture`, so every posted frame lands in R2 under the standard key with paired METAR. See `BOT.md`.
+Gateway bot (discord.py, `bot` dependency group) that records 👍/⛅/👎 reactions as Full/Partial/Not-Out labels — the mobile counterpart to the classifier UI. **It does not post on a schedule**: the Worker's visibility-change notifications are the labeling surface, and the Worker writes them with *this bot's token* so they are bot-authored. That is load-bearing — without the privileged Message Content intent Discord blanks the embeds of any other author's messages, so while notifications came from a webhook the capture-key footer was unreadable and every reaction on one was silently dropped. `bot/labeler.py` is pure logic (emoji normalization, capture-key footers, union-merge into the shared `labels.yaml`); `bot/main.py` is the discord.py wiring (`on_raw_reaction_add`, startup sweep of missed reactions, and `post-once` as a manual setup check). See `BOT.md`.
 
 ### Configuration (`mountain.toml`)
 
@@ -85,10 +85,10 @@ Inference runs as the `mountain-inference` Cloudflare Worker + Container (cron `
 - **Terraform (`scripts/deploy-inference.sh` + `terraform/`):** retained as the intended path for reproducibility/IaC later, but the `terraform/` dir is currently absent and the script's TF path is stale — don't rely on it until it's rebuilt. Treat it as aspirational, not the working deploy.
 
 Worker secrets (set via `wrangler secret put`):
-- `DISCORD_WEBHOOK_URL` — Discord channel webhook URL the Worker posts visibility embeds to (the URL *is* the secret). Set with `npx wrangler secret put DISCORD_WEBHOOK_URL` from `worker/`. See `NOTIFICATIONS.md`. (Replaced the former `NTFY_TOPIC`/`NTFY_TOKEN` ntfy.sh secrets — those and the gitignored `ntfy.key`/`ntfy-token.key` files are now obsolete.)
+- `DISCORD_BOT_TOKEN` / `DISCORD_CHANNEL_ID` — the labeler bot's credentials, so the Worker posts visibility changes *as that bot* and they're reaction-labelable. Same values as `cf.env`. See `NOTIFICATIONS.md`. (Replaced `DISCORD_WEBHOOK_URL`, which made posts unreadable to the bot; delete it with `npx wrangler secret delete DISCORD_WEBHOOK_URL`. The former `NTFY_TOPIC`/`NTFY_TOKEN` ntfy.sh secrets and the gitignored `ntfy.key`/`ntfy-token.key` files are also obsolete.)
 - `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` ← `cf.env` — let the container pull its checkpoint from R2 on cold start.
 
-Notifications fire on the **Not Out → visible** transition via `worker/src/discord-mountain-notify.ts`. Failures are silent: `/notify-test` always returns `202` (publish is queued via `waitUntil`) and Discord errors are only `console.error`'d. To diagnose, `cd worker && npx wrangler tail --format json` and look for `Discord ... failed` or `DISCORD_WEBHOOK_URL not set`.
+Notifications fire on a visibility change in **both directions**, debounced over two consecutive inference ticks (`worker/src/transition.ts`, bookkeeping in `notify-state.json`; raw predictions flap). Each post attaches the announced frame — never a `webcam_url` link, which would silently become a different picture — and footers its R2 capture key so a reaction becomes a training label. Formatting and delivery: `worker/src/discord-mountain-notify.ts`. Failures are silent: `/notify-test` always returns `202` (publish is queued via `waitUntil`) and Discord errors are only `console.error`'d. To diagnose, `cd worker && npx wrangler tail --format json` and look for `Discord ... failed` or `DISCORD_BOT_TOKEN/DISCORD_CHANNEL_ID not set`. Worker tests: `cd worker && npm test`.
 
 ## Key Design Constraints
 

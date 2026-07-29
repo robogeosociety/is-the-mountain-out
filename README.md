@@ -14,7 +14,7 @@ Append `?debug` to see confidence bars and the raw METAR readout.
 flowchart LR
   subgraph local["Mac mini (local)"]
     collector["collect collector<br/>(Nomad, on-demand)"]
-    labeler["bot labeler<br/>(Nomad, hourly daylight)"]
+    labeler["bot labeler<br/>(Nomad, always-on)"]
     trainer["training batch<br/>(MPS, on-demand)"]
   end
 
@@ -30,10 +30,10 @@ flowchart LR
   metar(["NOAA METAR (KSEA)"]) --> collector
   collector -- "captures + metar" --> r2priv
 
-  webcam --> labeler
-  metar --> labeler
-  labeler -- "captures + 👍⛅👎 labels" --> r2priv
-  labeler <-- "posts / reactions" --> discord(["Discord channel"])
+  worker -- "visibility change: frame + seeded 👍⛅👎 (as the bot)" --> discord(["Discord channel"])
+  worker -- "announced frame + metar" --> r2priv
+  discord -- "reactions" --> labeler
+  labeler -- "👍⛅👎 labels" --> r2priv
 
   r2priv -- "labels + cached images" --> trainer
   trainer -- "checkpoint" --> r2priv
@@ -61,6 +61,7 @@ sequenceDiagram
   participant M as NOAA METAR
   participant R2p as R2 (private)
   participant R2u as R2 (public)
+  participant D as Discord
 
   Cron->>W: scheduled() fires
   W->>C: POST /predict (DO binding)
@@ -73,6 +74,10 @@ sequenceDiagram
   C->>C: model.predict()
   C-->>W: PredictionState (class, confidence, weather)
   W->>R2u: PUT state.json
+  opt visibility changed, confirmed on 2 consecutive ticks
+    W->>R2p: PUT announced frame + metar
+    W->>D: POST embed as the labeler bot + seed 👍⛅👎
+  end
   W->>R2u: PUT history.jsonl (GET + append + PUT)
   Note over W,R2u: SPA picks up next 60s poll
 ```
@@ -165,7 +170,7 @@ uv run classify start [data_folder]
 uv run classify stop
 
 # Discord reaction-labeling bot (see BOT.md; needs cf.env)
-uv run --group bot bot run          # hourly daylight posts + reaction labeling
+uv run --group bot bot run          # reaction labeling + startup sweep
 uv run --group bot bot post-once    # post one labelable capture, then exit
 
 # Inference (server-side, used by the Cloudflare Container)
@@ -191,7 +196,7 @@ R2 S3 credentials (`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) live in `cf.env` 
 | Component | Host | Trigger |
 |---|---|---|
 | Capture collector | Mac mini (Nomad) | Cron, on-demand |
-| Discord labeling bot | Mac mini (Nomad) | Always-on (posts hourly in daylight) |
+| Discord labeling bot | Mac mini (Nomad) | Always-on (harvests reactions; the Worker does the posting) |
 | Training | Mac mini (MPS) | On-demand (`uv run training batch`) |
 | Inference cron | Cloudflare Worker | `*/15 * * * *` |
 | Inference compute | Cloudflare Container | Worker invocation |
