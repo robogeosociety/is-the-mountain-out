@@ -1,0 +1,21 @@
+# Runs the pytest suite on every PR and every push to main. Mirrors the ruff job's
+# style in lint.yml (checkout + astral-sh/setup-uv), but lives in its own workflow so
+# lint.yml stays a drop-in copy of the canonical ruff check.
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Pytest
+        run: uv run pytest -q
