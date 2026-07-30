@@ -19,13 +19,25 @@ Before any of this is worth doing, look at the dataset:
 | Full | **111** | **5.5%** |
 
 A classifier that answers "Not Out" every single time scores **86.3% accuracy**.
-The last training run reported **99.8% val accuracy** and we have been treating
-that as a triumph. It is a number dominated by the majority class, computed on a
-val split of a few hundred images containing perhaps twenty positives, and the
-telemetry reports **no per-class precision or recall at all**.
+The last training run reported **99.8% val accuracy** and we treated it as a
+triumph.
 
-We do not currently know how well this model detects the mountain. We know how
-well it detects fog.
+That number is not merely flattered by the imbalance — **it is invalid**. The
+train/val split ran *after* oversampling. Minority frames are duplicated (Full
+7x, Partial 5x at the current counts), and the split was applied to the
+duplicated list, so copies of the same image landed on both sides. Roughly
+**75 of 111 Full** and **91 of 164 Partial** images had at least one copy in
+validation *and* one in training. Validation was scoring the model on frames it
+had memorised. The split was also unseeded, so the val set was redrawn every
+week and run-over-run deltas were partly measuring the dice.
+
+So: every historical val number in this project is untrustworthy, and the
+telemetry reports **no per-class precision or recall at all**. We do not know
+how well this model detects the mountain. We know how well it detects fog.
+
+*(Both defects are fixed in the per-class-metrics PR — unique-first seeded
+split, plus per-class metrics. Expect the next scheduled run to look markedly
+worse: that is the leak closing, not a regression.)*
 
 **No backbone change will fix that**, and swapping architectures while blind to
 per-class performance means we won't be able to tell whether the swap helped.
