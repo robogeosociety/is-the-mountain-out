@@ -22,8 +22,10 @@ real prediction rather than a chore.
 
 ## How a label happens
 
-1. The Worker confirms a visibility change (both directions, debounced over two
-   inference ticks), persists the announced frame + paired METAR to R2 under the
+1. The Worker either confirms a visibility change it is **confident** about
+   (both directions, debounced over two inference ticks) or, when it is
+   **unsure**, asks outright with a 🤔 label request — the frames a label
+   actually teaches something. Either way it persists the announced frame + paired METAR to R2 under the
    collector's standard capture key, and posts it to the channel **using this
    bot's token** — attaching the frame, footering its capture key, and seeding
    the three label reactions. The METAR pairing matters: labeled samples stay

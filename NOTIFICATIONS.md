@@ -13,24 +13,44 @@ label this project can collect — precision over recall is the stated priority.
 
 ## What fires
 
-| Trigger | Title | Color | Confidence shown |
-|---|---|---|---|
-| not out → Full or Partial | 🏔️ The mountain is out! | green | combined visible-class % |
-| out → Not Out | ☁️ The mountain is gone | gray | not-out % |
+The channel does two different jobs, and confidence decides which one a tick gets.
 
-Two rules shape when a change counts:
+| Kind | Trigger | Title | Color |
+|---|---|---|---|
+| **Alert** | confirmed change, confidence ≥ `ALERT_MIN_CONFIDENCE` | 🏔️ The mountain is out! / ☁️ The mountain is gone | green / gray |
+| **Label request** | any tick below that threshold, at most once per `LABEL_COOLDOWN_HOURS` | 🤔 Is the mountain out? | amber |
+
+An **alert** must be trustworthy — you act on it. A **label request** must be
+informative — you correct it, and the correction is a training row. Those want
+opposite inputs, which is why one threshold *routes* between them rather than
+merely gating one.
+
+Three rules shape it (`worker/src/transition.ts`):
 
 - **Both directions.** The channel is the live answer, so it has to say when the
   answer stops being yes as well as when it starts.
-- **A change must survive two consecutive inference ticks** before it posts
-  (`worker/src/transition.ts`). Raw predictions flap — real history has *out* at
-  16:46, *gone* at 17:01, *out* again at 18:01, which the old
-  compare-to-previous-tick logic would have announced three times. The debounce
-  costs one tick (~15 min) of latency on a genuine change and buys a channel
-  where every post means something. Bookkeeping lives in `notify-state.json`
-  next to `state.json`; if that object is missing or unreadable the Worker
-  re-adopts the current visibility **silently**, so a lost file is never a false
-  alert.
+- **A change must survive two consecutive ticks** before it can post. Raw
+  predictions flap — real history has *out* 16:46, *gone* 17:01, *out* 18:01,
+  which compare-to-previous-tick announced three times.
+- **A held change only alerts when the model is sure.** Below the threshold
+  `pending` stays armed, so the alert is **delayed to the first confident tick,
+  never dropped** — and meanwhile that frame is exactly what a label request is
+  for. On 2026-07-29/30 this keeps the four alerts at 0.88–1.00 and suppresses
+  the four at 0.42–0.71, one of which reversed 30 minutes later.
+
+Confidence is **binary** — p(out) = full + partial, versus p(not out) — because
+that is the question being asked. A 0.45 Full / 0.45 Partial split is a
+confident *yes*, not a coin flip; gating on the top class score would mistake it
+for one.
+
+Bookkeeping lives in `notify-state.json` next to `state.json` (announced state,
+armed pending change, last label-request stamp). If it is missing or unreadable
+the Worker re-adopts current visibility **silently**, so a lost file is never a
+false alert. The cooldown stamp is written before the post, so a failed send
+costs one ask rather than unlocking a burst.
+
+A label request is pointless without a frame to ask about, so unlike an alert it
+is skipped entirely when the capture fails to persist.
 
 The embed **attaches** the announced frame rather than linking `webcam_url` —
 that URL is `…/webcam2_latest.jpg`, so a linked image would quietly become a

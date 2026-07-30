@@ -6,6 +6,19 @@ compatibility_flags = ["nodejs_compat"]
 [triggers]
 crons = ["*/15 * * * *"]
 
+# Alerting policy — see worker/src/transition.ts and NOTIFICATIONS.md. Tunable
+# here so thresholds move without a code change; both are parsed as numbers and
+# fall back to the code defaults when unset or unparseable.
+[vars]
+# Binary confidence (p(out) vs p(not out)) a confirmed change must clear to be
+# announced. Below it the frame becomes a label request instead. Measured on
+# 2026-07-29/30: 0.85 keeps the 4 trustworthy alerts and suppresses the 4 that
+# fired at 0.42–0.71, one of which reversed 30 minutes later.
+ALERT_MIN_CONFIDENCE = "0.85"
+# Minimum gap between label requests, so a long ambiguous stretch asks once
+# rather than every 15 minutes. 4h ≈ 4 asks/day on that same sample.
+LABEL_COOLDOWN_HOURS = "4"
+
 # Container binding. Cloudflare Containers can only pull from its own managed
 # registry (not GHCR), so the image is pushed to registry.cloudflare.com:
 #   docker pull ghcr.io/robogeosociety/is-the-mountain-out/inference:latest

@@ -196,6 +196,47 @@ export async function notifyMountainVisibility(env: Env, result: PredictionResul
   return true;
 }
 
+const COLOR_UNSURE = 0xf1c40f; // amber — a question, not an announcement
+
+/**
+ * Ask which it is, when the model can't tell.
+ *
+ * Deliberately NOT styled as an alert: no "the mountain is out!" claim, amber
+ * rather than green/gray, and the confidence is shown so a low number reads as
+ * the reason you're being asked. These frames are the ones a label teaches the
+ * model most — the confident ones it already gets right.
+ *
+ * Unlike an alert, this is pointless without a labelable frame: the whole post
+ * IS the question. No frame ⇒ no post.
+ */
+export async function notifyLabelRequest(env: Env, result: PredictionResult): Promise<boolean> {
+  const { visible, confidence, label, timestamp, frame, captureKey } = result;
+  if (!frame || !captureKey) {
+    console.warn("label request skipped: no persisted frame to ask about");
+    return false;
+  }
+
+  const embed: DiscordEmbed = {
+    title: "🤔 Is the mountain out?",
+    description: "The model isn't sure about this one. Your answer becomes a training label.",
+    color: COLOR_UNSURE,
+    fields: [
+      { name: "Best guess", value: label, inline: true },
+      { name: "Confidence", value: `${(confidence * 100).toFixed(1)}%`, inline: true },
+      { name: "Right or wrong?", value: REACTION_LEGEND, inline: false },
+    ],
+    image: { url: "attachment://capture.jpg" },
+    footer: { text: captureKey },
+    timestamp: timestamp ?? new Date().toISOString(),
+  };
+  void visible; // the guess is carried by `label`; the title stays a question
+
+  const messageId = await postAsBot(env, embed, "label request", frame);
+  if (messageId === null) return false;
+  await seedLabelReactions(env, messageId);
+  return true;
+}
+
 /**
  * Post a one-shot test embed (no inference involved) so the Worker → Discord
  * path can be verified end to end.
