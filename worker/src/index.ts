@@ -14,8 +14,18 @@
 // directly — no GitHub Contents API in the inference path.
 
 import { Container, getContainer } from "@cloudflare/containers";
-import { notifyDiscordTest, notifyMountainVisibility } from "./discord-mountain-notify";
-import { INITIAL_NOTIFY_STATE, decideTransition, type NotifyState } from "./transition";
+import {
+  notifyDiscordTest,
+  notifyLabelRequest,
+  notifyMountainVisibility,
+} from "./discord-mountain-notify";
+import {
+  DEFAULT_OPTIONS,
+  INITIAL_NOTIFY_STATE,
+  decideTransition,
+  type DecisionOptions,
+  type NotifyState,
+} from "./transition";
 
 interface Env {
   INFERENCE_CONTAINER: DurableObjectNamespace<InferenceContainer>;
@@ -29,6 +39,12 @@ interface Env {
   // error. Set out-of-band with `wrangler secret put`.
   DISCORD_BOT_TOKEN?: string;
   DISCORD_CHANNEL_ID?: string;
+  // Alerting policy, tunable without a code change (wrangler.toml [vars]).
+  // ALERT_MIN_CONFIDENCE: binary confidence a held change must clear to be
+  // announced; below it the frame becomes a label request instead.
+  // LABEL_COOLDOWN_HOURS: minimum gap between label requests.
+  ALERT_MIN_CONFIDENCE?: string;
+  LABEL_COOLDOWN_HOURS?: string;
 }
 
 export class InferenceContainer extends Container<Env> {
@@ -165,36 +181,64 @@ async function persistTransitionCapture(
   }
 }
 
-// Announce a confirmed change in BOTH directions — the channel is the live
-// answer to "is the mountain out?", so it has to say when the answer stops
-// being yes as well as when it starts. `decideTransition` supplies the
-// two-consecutive-ticks debounce that keeps flapping predictions off the wire.
+// Binary confidence in the predicted answer: p(out) = full + partial when the
+// mountain is out, p(not out) otherwise. This — not the top *class* score — is
+// the right gate, because "is the mountain out?" is the question being asked;
+// splitting 0.45 Full / 0.45 Partial is a confident YES, not a coin flip.
+function binaryConfidence(state: PredictionState): number {
+  return state.is_out
+    ? (state.confidence?.full ?? 0) + (state.confidence?.partial ?? 0)
+    : (state.confidence?.not_out ?? 0);
+}
+
+function decisionOptions(env: Env): DecisionOptions {
+  const num = (raw: string | undefined, fallback: number) => {
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+  return {
+    alertMinConfidence: num(env.ALERT_MIN_CONFIDENCE, DEFAULT_OPTIONS.alertMinConfidence),
+    labelCooldownMs:
+      num(env.LABEL_COOLDOWN_HOURS, DEFAULT_OPTIONS.labelCooldownMs / 3_600_000) * 3_600_000,
+  };
+}
+
+// One tick, one decision: announce a confirmed+confident change, ask for a
+// label when the model is unsure, or say nothing. See transition.ts for why
+// confidence routes the message rather than merely gating it.
 async function notifyTransition(env: Env, next: PredictionState): Promise<void> {
-  const { post, next: notifyState } = decideTransition(
+  const confidence = binaryConfidence(next);
+  const { kind, next: notifyState } = decideTransition(
     await getNotifyState(env),
     next.is_out,
+    confidence,
     isoUtc(new Date()),
+    decisionOptions(env),
   );
   // Persist BEFORE posting: a duplicate alert is worse than a missed one, and
-  // a crash between the two would otherwise re-announce on the next tick.
+  // a crash between the two would otherwise re-announce on the next tick. The
+  // cooldown stamp is written the same way, so a failed post costs one ask
+  // rather than unlocking a burst of them.
   await putNotifyState(env, notifyState);
-  if (!post) return;
+  if (kind === "quiet") return;
 
   const visible = next.is_out;
-  const confidence = visible
-    ? (next.confidence?.full ?? 0) + (next.confidence?.partial ?? 0)
-    : (next.confidence?.not_out ?? 0);
   const label = visible ? (next.class_name === "full" ? "Full" : "Partial") : "Not Out";
   const capture = await persistTransitionCapture(env, next);
-  await notifyMountainVisibility(env, {
+  const payload = {
     visible,
     confidence,
     label,
     timestamp: next.timestamp_utc,
     frame: capture?.frame,
     captureKey: capture?.key,
-    imageUrl: next.webcam_url,
-  });
+  };
+
+  if (kind === "label") {
+    await notifyLabelRequest(env, payload);
+    return;
+  }
+  await notifyMountainVisibility(env, { ...payload, imageUrl: next.webcam_url });
 }
 
 async function sendNotificationTest(env: Env): Promise<void> {
