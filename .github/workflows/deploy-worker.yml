@@ -1,0 +1,145 @@
+# Deploy the mountain-inference Worker from CI.
+#
+# This replaces "a human runs scripts/deploy-worker.sh on the Mac mini" as the
+# normal deploy path. The script survives as the break-glass path (see its
+# header); everything it did — gate, deploy, and record a GitHub Deployment with
+# success/failure status so the Environments page reflects reality — happens
+# here instead, on a runner, from the exact commit that landed on main.
+#
+# Auth: `secrets.CLOUDFLARE_API_TOKEN`. The workspace rule is "auth via code
+# flow, never mint tokens", but headless CI cannot run the `wrangler login`
+# browser flow, so a scoped API token is the sanctioned exception. It is created
+# by a human, once, and set with:
+#
+#   gh secret set CLOUDFLARE_API_TOKEN -R robogeosociety/is-the-mountain-out
+#
+# Required token scope is documented in CLAUDE.md → Deployment (Cloudflare).
+# Until that secret exists the deploy job fails at the preflight step with an
+# explicit message — never a wrangler stack trace.
+name: Deploy Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy-worker.yml'
+      - '.github/workflows/worker-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: write
+
+concurrency:
+  # Never cancel a deploy in flight — a half-applied wrangler deploy is worse
+  # than a queued one. Later pushes wait their turn.
+  group: deploy-worker-production
+  cancel-in-progress: false
+
+jobs:
+  # Same tests + typecheck that gate every PR. A deploy cannot outrun them.
+  test:
+    uses: ./.github/workflows/worker-ci.yml
+
+  deploy:
+    name: wrangler deploy
+    needs: test
+    runs-on: ubuntu-latest
+    # The `production` GitHub environment. Add a required reviewer there to turn
+    # this into an approval gate; nothing in this file has to change.
+    environment:
+      name: production
+      url: ${{ vars.WORKER_URL || 'https://mountain-inference.tommy-b-doerr.workers.dev' }}
+    env:
+      # `secrets` is not available in a job-level `if:`, so the missing-secret
+      # check is a first step rather than a skip condition.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # Account id is not a secret (it is already in worker/wrangler.toml's
+      # container image ref). Overridable with a repo variable.
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || 'd7adee58513c1b2f770ccaac90cf114f' }}
+      WORKER_URL: ${{ vars.WORKER_URL || 'https://mountain-inference.tommy-b-doerr.workers.dev' }}
+      GH_TOKEN: ${{ github.token }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      # Fail loudly and legibly when the secret is absent, BEFORE any GitHub
+      # Deployment is created — otherwise a missing credential would leave a
+      # dangling `in_progress` deployment on the Environments page forever.
+      - name: Preflight — CLOUDFLARE_API_TOKEN must be set
+        run: |
+          if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "CLOUDFLARE_API_TOKEN is present."
+            exit 0
+          fi
+          {
+            echo '## Deploy blocked — `CLOUDFLARE_API_TOKEN` is not set'
+            echo
+            echo 'This repository has no Cloudflare credential, so the Worker cannot be'
+            echo 'deployed from CI. Nothing was deployed and no GitHub Deployment was'
+            echo 'created.'
+            echo
+            echo 'Create a scoped Cloudflare API token (see CLAUDE.md → Deployment'
+            echo '(Cloudflare) for the exact permissions), then run:'
+            echo
+            echo '```sh'
+            echo 'gh secret set CLOUDFLARE_API_TOKEN -R robogeosociety/is-the-mountain-out'
+            echo '```'
+            echo
+            echo 'Until then, deploy with the break-glass path: `scripts/deploy-worker.sh`.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=CLOUDFLARE_API_TOKEN not set::No Cloudflare credential in this repo. Run: gh secret set CLOUDFLARE_API_TOKEN -R ${GITHUB_REPOSITORY} (see CLAUDE.md for the required token scope). Nothing was deployed."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install dependencies
+        working-directory: worker
+        run: npm ci || npm ci --omit=optional --ignore-scripts
+
+      # Mirrors scripts/deploy-worker.sh: best-effort Deployment record, so a
+      # GitHub API hiccup logs a warning but never blocks the actual deploy.
+      - name: Create GitHub Deployment
+        id: deployment
+        run: |
+          body="$(printf '{"ref":"%s","environment":"production","production_environment":true,"auto_merge":false,"required_contexts":[],"description":"CI wrangler deploy of mountain-inference"}' "$GITHUB_SHA")"
+          id="$(printf '%s' "$body" | gh api "repos/$GITHUB_REPOSITORY/deployments" --input - --jq '.id' 2>/dev/null || true)"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          if [ -n "$id" ]; then
+            echo "GitHub Deployment #$id created"
+            gh api "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" \
+              -f state=in_progress -f environment=production \
+              -f environment_url="$WORKER_URL" -f log_url="$RUN_URL" \
+              -f description='Deploying via wrangler (CI)' >/dev/null 2>&1 \
+              || echo "::warning::could not set deployment status=in_progress"
+          else
+            echo "::warning::GitHub Deployment not created; continuing with the deploy"
+          fi
+
+      - name: wrangler deploy
+        working-directory: worker
+        run: npx wrangler deploy
+
+      - name: Mark deployment success
+        if: success() && steps.deployment.outputs.id != ''
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/deployments/${{ steps.deployment.outputs.id }}/statuses" \
+            -f state=success -f environment=production \
+            -f environment_url="$WORKER_URL" -f log_url="$RUN_URL" \
+            -f description="Deployed to $WORKER_URL" >/dev/null \
+            || echo "::warning::could not set deployment status=success"
+          echo "Deployed $GITHUB_SHA → $WORKER_URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mark deployment failure
+        if: failure() && steps.deployment.outputs.id != ''
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/deployments/${{ steps.deployment.outputs.id }}/statuses" \
+            -f state=failure -f environment=production \
+            -f environment_url="$WORKER_URL" -f log_url="$RUN_URL" \
+            -f description='wrangler deploy failed (CI)' >/dev/null \
+            || echo "::warning::could not set deployment status=failure"

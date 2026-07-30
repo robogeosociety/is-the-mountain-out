@@ -1,0 +1,61 @@
+# Worker CI — the PR gate for worker/ (TypeScript).
+#
+# Until this existed, only ruff (lint.yml) gated pull requests, so a TypeScript
+# regression in the Worker could merge with `npm test` and `npm run typecheck`
+# never having run anywhere but a laptop.
+#
+# Deliberately NOT path-filtered: a path-filtered job that never starts reports
+# as "pending" forever once it is made a required check, silently blocking every
+# non-worker PR. The job takes well under a minute, so it just always runs.
+#
+# Exposed as `workflow_call` so deploy-worker.yml gates the production deploy on
+# exactly these checks rather than a copy that drifts. There is no push:main
+# trigger on purpose — a worker change landing on main is verified by the deploy
+# workflow calling this one, so main gets these checks without a duplicate run.
+name: Worker CI
+
+on:
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # github.workflow is the CALLER's workflow in a reusable run, so a deploy and
+  # a PR check never land in the same group and cancel each other.
+  group: worker-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test + typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 24: `node --test` runs the .ts test files directly via built-in
+      # type stripping (unflagged since 23.6). There is no test-time bundler.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      # Plain `npm ci` fails on macOS/arm64: miniflare hard-depends on sharp, no
+      # prebuilt binary resolves, and it falls back to a node-gyp source build.
+      # On linux/x64 runners @img/sharp-linux-x64 resolves and this is fine; the
+      # fallback keeps a bad sharp from taking CI down for a package that
+      # neither tsc nor `node --test` actually loads.
+      - name: Install dependencies
+        run: npm ci || npm ci --omit=optional --ignore-scripts
+
+      - name: Tests
+        run: npm test
+
+      - name: Typecheck
+        run: npm run typecheck
