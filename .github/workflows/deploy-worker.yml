@@ -4,7 +4,9 @@
 # normal deploy path. The script survives as the break-glass path (see its
 # header); everything it did — gate, deploy, and record a GitHub Deployment with
 # success/failure status so the Environments page reflects reality — happens
-# here instead, on a runner, from the exact commit that landed on main.
+# here instead, on a runner, from the exact commit that landed on main. The
+# Deployment record comes free with the `environment:` key below; see the note
+# on that block for why this workflow makes no explicit deployments API calls.
 #
 # Auth: `secrets.CLOUDFLARE_API_TOKEN`. The workspace rule is "auth via code
 # flow, never mint tokens", but headless CI cannot run the `wrangler login`
@@ -29,7 +31,6 @@ on:
 
 permissions:
   contents: read
-  deployments: write
 
 concurrency:
   # Never cancel a deploy in flight — a half-applied wrangler deploy is worse
@@ -46,8 +47,18 @@ jobs:
     name: wrangler deploy
     needs: test
     runs-on: ubuntu-latest
-    # The `production` GitHub environment. Add a required reviewer there to turn
-    # this into an approval gate; nothing in this file has to change.
+    # The `production` GitHub environment does double duty here.
+    #
+    # 1. Approval gate: add a required reviewer to the environment and this job
+    #    waits for it. Nothing in this file has to change.
+    # 2. Deployment bookkeeping. This is the whole reason there are no explicit
+    #    `gh api .../deployments` calls here, unlike scripts/deploy-worker.sh:
+    #    an `environment:` job ALREADY creates a GitHub Deployment and moves it
+    #    in_progress → success/failure, carrying `url` below through as
+    #    environment_url plus a log_url back to this job. Verified on run
+    #    30559836026 — a failed deploy produced exactly the in_progress →
+    #    failure pair the script produces by hand. Recording our own on top
+    #    would put two entries on the Environments page for every deploy.
     environment:
       name: production
       url: ${{ vars.WORKER_URL || 'https://mountain-inference.tommy-b-doerr.workers.dev' }}
@@ -59,12 +70,11 @@ jobs:
       # container image ref). Overridable with a repo variable.
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || 'd7adee58513c1b2f770ccaac90cf114f' }}
       WORKER_URL: ${{ vars.WORKER_URL || 'https://mountain-inference.tommy-b-doerr.workers.dev' }}
-      GH_TOKEN: ${{ github.token }}
-      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
-      # Fail loudly and legibly when the secret is absent, BEFORE any GitHub
-      # Deployment is created — otherwise a missing credential would leave a
-      # dangling `in_progress` deployment on the Environments page forever.
+      # Fail loudly and legibly when the secret is absent, and fail FIRST — the
+      # environment's deployment record is already open by the time any step
+      # runs, so the sooner this exits the sooner that record lands on
+      # `failure` instead of sitting `in_progress`.
       - name: Preflight — CLOUDFLARE_API_TOKEN must be set
         run: |
           if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
@@ -75,8 +85,7 @@ jobs:
             echo '## Deploy blocked — `CLOUDFLARE_API_TOKEN` is not set'
             echo
             echo 'This repository has no Cloudflare credential, so the Worker cannot be'
-            echo 'deployed from CI. Nothing was deployed and no GitHub Deployment was'
-            echo 'created.'
+            echo 'deployed from CI. Nothing was deployed.'
             echo
             echo 'Create a scoped Cloudflare API token (see CLAUDE.md → Deployment'
             echo '(Cloudflare) for the exact permissions), then run:'
@@ -102,44 +111,10 @@ jobs:
         working-directory: worker
         run: npm ci || npm ci --omit=optional --ignore-scripts
 
-      # Mirrors scripts/deploy-worker.sh: best-effort Deployment record, so a
-      # GitHub API hiccup logs a warning but never blocks the actual deploy.
-      - name: Create GitHub Deployment
-        id: deployment
-        run: |
-          body="$(printf '{"ref":"%s","environment":"production","production_environment":true,"auto_merge":false,"required_contexts":[],"description":"CI wrangler deploy of mountain-inference"}' "$GITHUB_SHA")"
-          id="$(printf '%s' "$body" | gh api "repos/$GITHUB_REPOSITORY/deployments" --input - --jq '.id' 2>/dev/null || true)"
-          echo "id=$id" >> "$GITHUB_OUTPUT"
-          if [ -n "$id" ]; then
-            echo "GitHub Deployment #$id created"
-            gh api "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" \
-              -f state=in_progress -f environment=production \
-              -f environment_url="$WORKER_URL" -f log_url="$RUN_URL" \
-              -f description='Deploying via wrangler (CI)' >/dev/null 2>&1 \
-              || echo "::warning::could not set deployment status=in_progress"
-          else
-            echo "::warning::GitHub Deployment not created; continuing with the deploy"
-          fi
-
       - name: wrangler deploy
         working-directory: worker
         run: npx wrangler deploy
 
-      - name: Mark deployment success
-        if: success() && steps.deployment.outputs.id != ''
-        run: |
-          gh api "repos/$GITHUB_REPOSITORY/deployments/${{ steps.deployment.outputs.id }}/statuses" \
-            -f state=success -f environment=production \
-            -f environment_url="$WORKER_URL" -f log_url="$RUN_URL" \
-            -f description="Deployed to $WORKER_URL" >/dev/null \
-            || echo "::warning::could not set deployment status=success"
-          echo "Deployed $GITHUB_SHA → $WORKER_URL" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Mark deployment failure
-        if: failure() && steps.deployment.outputs.id != ''
-        run: |
-          gh api "repos/$GITHUB_REPOSITORY/deployments/${{ steps.deployment.outputs.id }}/statuses" \
-            -f state=failure -f environment=production \
-            -f environment_url="$WORKER_URL" -f log_url="$RUN_URL" \
-            -f description='wrangler deploy failed (CI)' >/dev/null \
-            || echo "::warning::could not set deployment status=failure"
+      - name: Summary
+        if: success()
+        run: echo "Deployed \`$GITHUB_SHA\` → $WORKER_URL" >> "$GITHUB_STEP_SUMMARY"

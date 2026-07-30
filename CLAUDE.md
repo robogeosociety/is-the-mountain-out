@@ -81,7 +81,9 @@ Single source of truth for webcam URL, METAR station (`KSEA`), LoRA hyperparamet
 
 Inference runs as the `mountain-inference` Cloudflare Worker + Container (cron `*/15`), with R2 for storage and Pages for the SPA.
 
-**The Worker deploys from CI — `.github/workflows/deploy-worker.yml`.** A push to `main` touching `worker/**` (or `gh workflow run deploy-worker.yml`) runs the worker tests + typecheck, then `npx wrangler deploy`, inside the `production` GitHub environment. It creates a GitHub Deployment and sets `in_progress` → `success`/`failure` on it, so the Environments page reflects what is actually live — the same bookkeeping `scripts/deploy-worker.sh` used to do from a laptop. Deploys are serialized (`cancel-in-progress: false`): one in flight is never cancelled. To require human approval, add a required reviewer to the `production` environment — no workflow change needed.
+**The Worker deploys from CI — `.github/workflows/deploy-worker.yml`.** A push to `main` touching `worker/**` (or `gh workflow run deploy-worker.yml`) runs the worker tests + typecheck, then `npx wrangler deploy`, inside the `production` GitHub environment. Deploys are serialized (`cancel-in-progress: false`): one in flight is never cancelled. To require human approval, add a required reviewer to the `production` environment — no workflow change needed.
+
+The GitHub Deployment record comes free with the job's `environment:` key: Actions itself opens a deployment and moves it `in_progress` → `success`/`failure`, with `environment_url` and a `log_url` to the run. That is *exactly* the bookkeeping `scripts/deploy-worker.sh` does by hand, so the workflow makes **no** explicit deployments-API calls — doing both would put two entries on the Environments page per deploy.
 
 Deploy paths, in order of preference:
 
@@ -97,16 +99,21 @@ The container image is *not* built or pushed by this workflow. `worker/wrangler.
 gh secret set CLOUDFLARE_API_TOKEN -R robogeosociety/is-the-mountain-out
 ```
 
-Required permissions (all **Account**-scoped, restricted to that one account):
+Required permissions — **two**, both **Account**-scoped and restricted to that one account:
 
 | Permission | Why |
 | --- | --- |
-| `Workers Scripts: Edit` | Upload the script, its bindings, the DO migration, and the cron trigger. The one non-negotiable scope. |
-| `Workers R2 Storage: Edit` | `wrangler.toml` declares two `[[r2_buckets]]` bindings, resolved at deploy. Part of Cloudflare's own "Edit Cloudflare Workers" template. |
-| `Account Settings: Read` | Account lookup/validation during deploy. |
-| `Cloudflare Containers: Edit` | `wrangler.toml` has a `[[containers]]` block, so deploy also updates the container application (image ref, `max_instances`, `instance_type`). Without it the script uploads but the container step fails. |
+| `Workers Scripts: Edit` | Script upload, and with it the DO + R2 bindings, the `new_sqlite_classes` migration, and the `[triggers] crons` schedule. Non-negotiable. |
+| `Containers: Edit` | `wrangler.toml` has a `[[containers]]` block, so every deploy also PATCHes the container application (`/accounts/{id}/containers/applications`) with the image ref, `max_instances`, `instance_type`. Without it the script uploads and the container step 403s. |
 
-Not needed: `Cloudflare Images: Edit` (only for `wrangler containers push`, which CI does not do) and `Workers KV`/`D1`/`Queues` (no such bindings). If in doubt, Cloudflare's stock **"Edit Cloudflare Workers"** token template is a working superset; prefer the narrower list above. The token is *only* for CI — the operator's laptop keeps using `wrangler login`.
+Deliberately **not** granted, each for a reason:
+
+- `Workers R2 Storage: Edit` — an `[[r2_buckets]]` entry with an explicit `bucket_name` is pure script metadata; wrangler makes no R2 call. It only provisions buckets under the opt-in `--x-provision` flag. Add this only if CI ever runs `wrangler r2 …` itself (e.g. pushing a checkpoint).
+- `Cloudflare Images: Edit` — a different product entirely (imagedelivery.net). Managed-registry auth is brokered through the *containers* API, and CI does not push images anyway.
+- `User Details: Read` / `Memberships: Read` — only needed when wrangler has to discover the account. The workflow sets `CLOUDFLARE_ACCOUNT_ID`, so `/accounts` and `/memberships` are never called. Keep that env var: an account-owned token *cannot* carry User-scoped permissions (`/memberships` returns error 9106), so it is effectively mandatory there.
+- `Workers Routes: Edit` (zone) — the Worker is `workers.dev` + cron only, no zone routes.
+
+Cloudflare's stock **"Edit Cloudflare Workers"** template is *not* sufficient on its own: it omits Containers. If an unexplained 403 appears, that template **plus `Containers: Edit`** is the low-risk superset. (Known upstream wrinkle: [workers-sdk#12483](https://github.com/cloudflare/workers-sdk/issues/12483) — `/containers/applications` 401 despite a valid containers scope.) The token is *only* for CI; the operator's laptop keeps using `wrangler login`.
 
 Worker secrets themselves are still set out-of-band with `wrangler secret put` and only go live on the next deploy; CI does not manage them.
 
