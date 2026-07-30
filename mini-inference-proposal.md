@@ -75,14 +75,13 @@ closed something".
 
 Keep the Worker. Move only the *model*.
 
-```
-Worker cron */15  ──►  mini inference service (Tailscale, tailnet-only)
-      │                        │
-      │  on failure/timeout    │
-      └──► fall back to the Cloudflare container (kept warm-ish, cheap)
-                               │
-      Worker still owns: state.json, history.jsonl, notify-state.json,
-      the Discord posts, and the public SPA contract
+```mermaid
+flowchart TD
+  cron["Worker cron */15"] --> mini{"mini inference service<br/>Tailscale, tailnet-only"}
+  mini -- ok --> own
+  mini -- "unreachable / timeout" --> cf["Cloudflare container<br/>(fallback, unchanged)"]
+  cf --> own["Worker still owns:<br/>state.json · history.jsonl · notify-state.json<br/>Discord posts · public SPA contract"]
+  own --> spa(["SPA + #mountain"])
 ```
 
 This keeps every externally-visible contract identical, gets the latency and
