@@ -79,10 +79,36 @@ Single source of truth for webcam URL, METAR station (`KSEA`), LoRA hyperparamet
 
 ## Deployment (Cloudflare)
 
-Inference runs as the `mountain-inference` Cloudflare Worker + Container (cron `*/15`), with R2 for storage and Pages for the SPA. There are two deploy paths; **prefer wrangler**:
+Inference runs as the `mountain-inference` Cloudflare Worker + Container (cron `*/15`), with R2 for storage and Pages for the SPA.
 
-- **wrangler (current, preferred):** `scripts/deploy-worker.sh` runs `npx wrangler deploy` from `worker/` and records a GitHub Deployment. This is what the live Worker uses (`last_deployed_from: wrangler`). Secrets are set out-of-band with `wrangler secret put` and only go live on the next `wrangler deploy`.
-- **Terraform (`scripts/deploy-inference.sh` + `terraform/`):** retained as the intended path for reproducibility/IaC later, but the `terraform/` dir is currently absent and the script's TF path is stale — don't rely on it until it's rebuilt. Treat it as aspirational, not the working deploy.
+**The Worker deploys from CI — `.github/workflows/deploy-worker.yml`.** A push to `main` touching `worker/**` (or `gh workflow run deploy-worker.yml`) runs the worker tests + typecheck, then `npx wrangler deploy`, inside the `production` GitHub environment. It creates a GitHub Deployment and sets `in_progress` → `success`/`failure` on it, so the Environments page reflects what is actually live — the same bookkeeping `scripts/deploy-worker.sh` used to do from a laptop. Deploys are serialized (`cancel-in-progress: false`): one in flight is never cancelled. To require human approval, add a required reviewer to the `production` environment — no workflow change needed.
+
+Deploy paths, in order of preference:
+
+- **CI (normal):** the workflow above. Auth is the repo secret `CLOUDFLARE_API_TOKEN`.
+- **`scripts/deploy-worker.sh` (break-glass):** same wrangler deploy + GitHub Deployment, run by a human under their own `wrangler login`. For when Actions is down, the token is expired, or an uncommitted tree must ship. It warns on a dirty tree, because the Deployment it records then points at a ref that does not match what went live.
+- **Terraform (`scripts/deploy-inference.sh` + `terraform/`):** aspirational only — the `terraform/` dir does not exist and the script's TF path is stale. Do not rely on it.
+
+The container image is *not* built or pushed by this workflow. `worker/wrangler.toml` pins an already-pushed tag in Cloudflare's managed registry; `.github/workflows/build-inference-image.yml` builds to GHCR and the `registry.cloudflare.com` push is still manual (`wrangler containers push`).
+
+**CI credential — `CLOUDFLARE_API_TOKEN`.** The workspace rule is "auth via code flow, never mint tokens", but headless CI cannot run `wrangler login`'s browser flow, so a scoped API token is the sanctioned exception. Create it at *My Profile → API Tokens → Create Token*, scoped to account `d7adee58513c1b2f770ccaac90cf114f`, then:
+
+```sh
+gh secret set CLOUDFLARE_API_TOKEN -R robogeosociety/is-the-mountain-out
+```
+
+Required permissions (all **Account**-scoped, restricted to that one account):
+
+| Permission | Why |
+| --- | --- |
+| `Workers Scripts: Edit` | Upload the script, its bindings, the DO migration, and the cron trigger. The one non-negotiable scope. |
+| `Workers R2 Storage: Edit` | `wrangler.toml` declares two `[[r2_buckets]]` bindings, resolved at deploy. Part of Cloudflare's own "Edit Cloudflare Workers" template. |
+| `Account Settings: Read` | Account lookup/validation during deploy. |
+| `Cloudflare Containers: Edit` | `wrangler.toml` has a `[[containers]]` block, so deploy also updates the container application (image ref, `max_instances`, `instance_type`). Without it the script uploads but the container step fails. |
+
+Not needed: `Cloudflare Images: Edit` (only for `wrangler containers push`, which CI does not do) and `Workers KV`/`D1`/`Queues` (no such bindings). If in doubt, Cloudflare's stock **"Edit Cloudflare Workers"** token template is a working superset; prefer the narrower list above. The token is *only* for CI — the operator's laptop keeps using `wrangler login`.
+
+Worker secrets themselves are still set out-of-band with `wrangler secret put` and only go live on the next deploy; CI does not manage them.
 
 Worker secrets (set via `wrangler secret put`):
 - `DISCORD_BOT_TOKEN` / `DISCORD_CHANNEL_ID` — the labeler bot's credentials, so the Worker posts visibility changes *as that bot* and they're reaction-labelable. Same values as `cf.env`. See `NOTIFICATIONS.md`. (Replaced `DISCORD_WEBHOOK_URL`, which made posts unreadable to the bot; delete it with `npx wrangler secret delete DISCORD_WEBHOOK_URL`. The former `NTFY_TOPIC`/`NTFY_TOKEN` ntfy.sh secrets and the gitignored `ntfy.key`/`ntfy-token.key` files are also obsolete.)
