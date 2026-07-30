@@ -8,10 +8,14 @@ whether to RUN, following the fleet's cheap-no-op convention:
    `labels/train-watermark.json`; exit 0 quietly when nothing is new.
 2. Refresh `data/labels.yaml` from R2 (`collect sync labels pull`), post a
    start embed to #mountain (bot-token REST — no gateway needed), then run
-   `training batch --json-summary` and trust the summary file, not stdout.
-3. Success → advance the watermark and edit the embed with metrics (including
-   the best-val-loss delta vs the previous run). Failure → edit the embed with
-   the error and leave the watermark, so next week retries the same delta.
+   `training batch --json-summary --progress-jsonl` and trust those files, not
+   stdout.
+3. While it runs, tail the progress jsonl and post each SAVED CHECKPOINT as its
+   own message (~3 per 5-epoch run — only improvements save), with per-epoch
+   metrics and memory.
+4. Success → advance the watermark and edit the start embed with final metrics
+   (best-val-loss delta vs the previous run, peak memory). Failure → edit it
+   with the error and leave the watermark, so next week retries the same delta.
 
 Run via scripts/scheduled-train.sh (sources cf.env). Discord being down never
 fails a training run — telemetry is best-effort.
@@ -24,6 +28,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -137,6 +143,78 @@ def _acc_delta_text(acc: float | None, previous: float | None) -> str:
     return f"{acc:.1%} — {arrow} {abs(delta_pt):.1f}pt vs last ({previous:.1%})"
 
 
+def _gb(mb: float) -> str:
+    return f"{mb / 1024:.2f} GB"
+
+
+def _memory_text(memory: Mapping[str, Any] | None) -> str:
+    """Render whatever probes came back — see scheduler.memory_snapshot()."""
+    if not memory:
+        return "n/a"
+    parts = []
+    if memory.get("rss_peak_mb"):
+        parts.append(f"peak RSS {_gb(memory['rss_peak_mb'])}")
+    if memory.get("mps_allocated_mb"):
+        mps = f"MPS {_gb(memory['mps_allocated_mb'])}"
+        if memory.get("mps_driver_mb"):
+            mps += f" ({_gb(memory['mps_driver_mb'])} driver)"
+        parts.append(mps)
+    if memory.get("cuda_allocated_mb"):
+        parts.append(f"CUDA {_gb(memory['cuda_allocated_mb'])}")
+    return " · ".join(parts) or "n/a"
+
+
+def peak_memory(per_epoch: list[dict]) -> dict:
+    """High-water mark across epochs, key by key."""
+    peak: dict[str, float] = {}
+    for epoch in per_epoch:
+        for key, value in (epoch.get("memory") or {}).items():
+            if isinstance(value, int | float):
+                peak[key] = max(peak.get(key, 0.0), float(value))
+    return peak
+
+
+def checkpoint_embed(record: Mapping[str, Any]) -> dict:
+    """One saved checkpoint, posted as its own message while the run continues.
+
+    Only an improvement saves a checkpoint, so this fires ~3x in a 5-epoch run —
+    a progress trail you can watch, not a per-epoch firehose.
+    """
+    val_loss = float(record.get("val_loss", 0.0))
+    previous = record.get("previous_best_val_loss")
+    delta = (
+        "first checkpoint this run"
+        if previous is None
+        else f"▼ {float(previous) - val_loss:.4f} better than {float(previous):.4f}"
+    )
+    keys = record.get("checkpoint_keys") or []
+    return {
+        "title": f"💾 Checkpoint saved — epoch {record.get('epoch', '?')}/{record.get('total_epochs', '?')}",
+        "color": COLOR_OK if len(keys) == 3 else COLOR_FAILED,
+        "fields": [
+            {"name": "Val loss", "value": f"{val_loss:.4f} — {delta}", "inline": False},
+            {
+                "name": "Val accuracy",
+                "value": f"{float(record.get('val_acc', 0.0)):.1%}",
+                "inline": True,
+            },
+            {
+                "name": "Epoch time",
+                "value": f"{float(record.get('duration_s', 0.0)) / 60:.1f} min",
+                "inline": True,
+            },
+            {
+                "name": "Memory",
+                "value": _memory_text(record.get("memory")),
+                "inline": False,
+            },
+            {"name": "Uploaded", "value": f"{len(keys)}/3 files → R2", "inline": True},
+        ],
+        "footer": {"text": "is-the-mountain-out • scheduled training"},
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+
+
 def _duration_text(duration_s: float, summary: dict) -> str:
     """Total wall time with the prefetch/epoch breakdown when the summary has it."""
     parts = [f"{duration_s / 60:.0f} min total"]
@@ -209,6 +287,11 @@ def result_embed(
                 "value": _duration_text(duration_s, summary),
                 "inline": True,
             },
+            {
+                "name": "Peak memory",
+                "value": _memory_text(peak_memory(per_epoch)),
+                "inline": False,
+            },
             {"name": "Checkpoint", "value": checkpoint, "inline": False},
         ],
         "footer": {"text": "is-the-mountain-out • scheduled training"},
@@ -274,6 +357,18 @@ class Telemetry:
             "POST", f"{DISCORD_API}/channels/{self.channel_id}/messages", embed
         )
 
+    def post_standalone(self, embed: dict) -> None:
+        """Post a message that is NOT the run's main message.
+
+        Checkpoints are their own posts, so they must not capture
+        `message_id` — the final result still edits the start message.
+        """
+        if not self.enabled:
+            return
+        self._request(
+            "POST", f"{DISCORD_API}/channels/{self.channel_id}/messages", embed
+        )
+
     def update(self, embed: dict) -> None:
         if not self.enabled:
             return
@@ -285,6 +380,44 @@ class Telemetry:
             f"{DISCORD_API}/channels/{self.channel_id}/messages/{self.message_id}",
             embed,
         )
+
+
+# ---------- Live progress (tail the trainer's JSONL while it runs) ----------
+
+PROGRESS_POLL_SECONDS = 15
+
+
+def drain_progress(path: Path, offset: int, telemetry: Telemetry) -> int:
+    """Post any newly-completed checkpoint lines; return the new byte offset.
+
+    Reads bytes, not lines, and stops at the last newline: the trainer appends
+    while we read, so a partial final line is left for the next poll rather
+    than parsed as truncated JSON. Never raises — losing a progress post must
+    not abort a training run that is otherwise fine.
+    """
+    try:
+        if not path.exists():
+            return offset
+        with open(path, "rb") as handle:
+            handle.seek(offset)
+            chunk = handle.read()
+    except OSError as exc:
+        print(f"telemetry: progress read failed (non-fatal): {exc}")
+        return offset
+
+    complete = chunk.rfind(b"\n") + 1
+    if complete <= 0:
+        return offset
+    for raw in chunk[:complete].splitlines():
+        if not raw.strip():
+            continue
+        try:
+            record = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("checkpoint_saved"):
+            telemetry.post_standalone(checkpoint_embed(record))
+    return offset + complete
 
 
 # ---------- The run ----------
@@ -348,8 +481,14 @@ def main(config: str, data_root: str, check: bool) -> None:
         telemetry.update(failure_embed(len(pending), "labels pull from R2 failed"))
         raise click.ClickException("labels pull failed; aborting before training")
 
-    summary_path = Path(tempfile.mkdtemp(prefix="mountain-train-")) / "summary.json"
-    result = subprocess.run(
+    run_dir = Path(tempfile.mkdtemp(prefix="mountain-train-"))
+    summary_path = run_dir / "summary.json"
+    progress_path = run_dir / "progress.jsonl"
+
+    # Popen, not run(): the trainer takes ~an hour, and the point of the
+    # progress file is to report checkpoints WHILE it works rather than
+    # reconstructing them from the summary afterwards.
+    proc = subprocess.Popen(
         [
             _tool("training"),
             "batch",
@@ -361,9 +500,19 @@ def main(config: str, data_root: str, check: bool) -> None:
             config,
             "--json-summary",
             str(summary_path),
+            "--progress-jsonl",
+            str(progress_path),
         ],
-        check=False,
     )
+    offset = 0
+    while proc.poll() is None:
+        time.sleep(PROGRESS_POLL_SECONDS)
+        offset = drain_progress(progress_path, offset, telemetry)
+    # Final drain: the last epoch's checkpoint is usually written between the
+    # previous poll and process exit.
+    drain_progress(progress_path, offset, telemetry)
+
+    returncode = proc.returncode
     duration_s = (datetime.now(UTC) - started_at).total_seconds()
 
     summary: dict[str, Any] = {}
@@ -373,8 +522,8 @@ def main(config: str, data_root: str, check: bool) -> None:
         except ValueError:
             summary = {}
 
-    if result.returncode != 0 or summary.get("status") != "ok":
-        reason = f"training exit {result.returncode}, summary status: {summary.get('status', 'missing')}"
+    if returncode != 0 or summary.get("status") != "ok":
+        reason = f"training exit {returncode}, summary status: {summary.get('status', 'missing')}"
         print(f"run failed — {reason}; watermark NOT advanced")
         telemetry.update(failure_embed(len(pending), reason))
         sys.exit(1)

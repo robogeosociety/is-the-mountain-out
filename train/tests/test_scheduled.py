@@ -149,3 +149,239 @@ class TestEmbeds:
         embed = scheduled.failure_embed(3, "training exit 1")
         assert embed["color"] == scheduled.COLOR_FAILED
         assert "watermark not advanced" in embed["fields"][2]["value"]
+
+
+class TestMemoryTelemetry:
+    def test_renders_macos_mps_probe(self):
+        text = scheduled._memory_text(
+            {"rss_peak_mb": 4300.0, "mps_allocated_mb": 1843.2, "mps_driver_mb": 2150.4}
+        )
+        assert "peak RSS 4.20 GB" in text
+        assert "MPS 1.80 GB (2.10 GB driver)" in text
+
+    def test_missing_probes_degrade_not_crash(self):
+        assert scheduled._memory_text(None) == "n/a"
+        assert scheduled._memory_text({}) == "n/a"
+        # A CPU-only box has RSS but no accelerator keys.
+        assert scheduled._memory_text({"rss_peak_mb": 2048.0}) == "peak RSS 2.00 GB"
+
+    def test_peak_is_the_high_water_mark_across_epochs(self):
+        peak = scheduled.peak_memory(
+            [
+                {"memory": {"rss_peak_mb": 1000.0, "mps_allocated_mb": 500.0}},
+                {"memory": {"rss_peak_mb": 3000.0, "mps_allocated_mb": 400.0}},
+                {},  # an epoch recorded before this feature existed
+            ]
+        )
+        # Max is per key, independently: RSS peaks in epoch 2, MPS in epoch 1.
+        assert peak == {"rss_peak_mb": 3000.0, "mps_allocated_mb": 500.0}
+
+
+class TestCheckpointEmbed:
+    RECORD = {
+        "epoch": 3,
+        "total_epochs": 5,
+        "val_loss": 0.0163,
+        "val_acc": 0.998,
+        "duration_s": 594.0,
+        "previous_best_val_loss": 0.0205,
+        "checkpoint_keys": ["a", "b", "c"],
+        "memory": {"rss_peak_mb": 4300.0},
+        "checkpoint_saved": True,
+    }
+
+    def test_reports_improvement_over_the_run_best(self):
+        embed = scheduled.checkpoint_embed(self.RECORD)
+        values = {f["name"]: f["value"] for f in embed["fields"]}
+        assert "epoch 3/5" in embed["title"]
+        assert "0.0042 better than 0.0205" in values["Val loss"]
+        assert values["Val accuracy"] == "99.8%"
+        assert values["Epoch time"] == "9.9 min"
+        assert "peak RSS 4.20 GB" in values["Memory"]
+        assert embed["color"] == scheduled.COLOR_OK
+
+    def test_first_checkpoint_has_nothing_to_compare(self):
+        first = dict(self.RECORD, previous_best_val_loss=None)
+        values = {
+            f["name"]: f["value"] for f in scheduled.checkpoint_embed(first)["fields"]
+        }
+        assert "first checkpoint this run" in values["Val loss"]
+
+    def test_partial_upload_is_flagged_red(self):
+        partial = dict(self.RECORD, checkpoint_keys=["a"])
+        embed = scheduled.checkpoint_embed(partial)
+        assert embed["color"] == scheduled.COLOR_FAILED
+        assert (
+            "1/3 files" in {f["name"]: f["value"] for f in embed["fields"]}["Uploaded"]
+        )
+
+
+class _RecordingTelemetry:
+    def __init__(self):
+        self.posted = []
+
+    def post_standalone(self, embed):
+        self.posted.append(embed)
+
+
+class TestDrainProgress:
+    def test_only_checkpoint_lines_post(self, tmp_path):
+        path = tmp_path / "progress.jsonl"
+        path.write_text(
+            json.dumps({"epoch": 1, "checkpoint_saved": False, "val_loss": 0.9})
+            + "\n"
+            + json.dumps(
+                {
+                    "epoch": 2,
+                    "checkpoint_saved": True,
+                    "val_loss": 0.5,
+                    "total_epochs": 5,
+                    "checkpoint_keys": ["a", "b", "c"],
+                }
+            )
+            + "\n"
+        )
+        tel = _RecordingTelemetry()
+        offset = scheduled.drain_progress(path, 0, tel)
+        assert len(tel.posted) == 1
+        assert "epoch 2/5" in tel.posted[0]["title"]
+        assert offset == path.stat().st_size
+
+    def test_resumes_from_offset_without_reposting(self, tmp_path):
+        path = tmp_path / "progress.jsonl"
+        line = (
+            json.dumps(
+                {
+                    "epoch": 1,
+                    "checkpoint_saved": True,
+                    "total_epochs": 5,
+                    "val_loss": 0.5,
+                    "checkpoint_keys": ["a", "b", "c"],
+                }
+            )
+            + "\n"
+        )
+        path.write_text(line)
+        tel = _RecordingTelemetry()
+        offset = scheduled.drain_progress(path, 0, tel)
+        assert len(tel.posted) == 1
+        # Nothing new appended -> no duplicate post.
+        assert scheduled.drain_progress(path, offset, tel) == offset
+        assert len(tel.posted) == 1
+
+    def test_partial_trailing_line_is_left_for_the_next_poll(self, tmp_path):
+        path = tmp_path / "progress.jsonl"
+        complete = (
+            json.dumps(
+                {
+                    "epoch": 1,
+                    "checkpoint_saved": True,
+                    "total_epochs": 5,
+                    "val_loss": 0.5,
+                    "checkpoint_keys": ["a", "b", "c"],
+                }
+            )
+            + "\n"
+        )
+        path.write_bytes((complete + '{"epoch": 2, "checkpoint_sav').encode())
+        tel = _RecordingTelemetry()
+        offset = scheduled.drain_progress(path, 0, tel)
+        assert len(tel.posted) == 1
+        assert offset == len(complete.encode()), "partial line must not be consumed"
+
+        # The writer finishes the line; the next poll picks it up exactly once.
+        with open(path, "a") as handle:
+            handle.write(
+                'ed": true, "total_epochs": 5, "val_loss": 0.4, '
+                '"epoch_done": 1, "checkpoint_keys": ["a","b","c"]}\n'
+            )
+        scheduled.drain_progress(path, offset, tel)
+        assert len(tel.posted) == 2
+
+    def test_missing_file_and_garbage_are_survivable(self, tmp_path):
+        tel = _RecordingTelemetry()
+        assert scheduled.drain_progress(tmp_path / "nope.jsonl", 0, tel) == 0
+        path = tmp_path / "progress.jsonl"
+        path.write_text("not json\n\n" + json.dumps({"checkpoint_saved": False}) + "\n")
+        scheduled.drain_progress(path, 0, tel)
+        assert tel.posted == []
+
+
+class TestEmitterConsumerContract:
+    """The trainer writes these lines and scheduled.py parses them. The two live
+    in different modules and different processes, so agreement is asserted here
+    rather than assumed."""
+
+    def test_real_emitter_output_drains_into_a_checkpoint_post(
+        self, tmp_path, monkeypatch
+    ):
+        import json as _json
+        import os as _os
+
+        progress = tmp_path / "progress.jsonl"
+
+        # Reproduce train.scheduler.batch's _emit_progress verbatim in shape:
+        # append one json line, flush, fsync.
+        def emit(event):
+            with open(progress, "a") as handle:
+                handle.write(_json.dumps(event) + "\n")
+                handle.flush()
+                _os.fsync(handle.fileno())
+
+        from train.scheduler import memory_snapshot
+
+        memory = memory_snapshot()
+        assert isinstance(memory, dict), "probe must always return a dict"
+
+        emit(
+            {
+                "epoch": 1,
+                "total_epochs": 5,
+                "train_loss": 0.9,
+                "val_loss": 0.8,
+                "val_acc": 0.7,
+                "duration_s": 300.0,
+                "memory": memory,
+                "checkpoint_saved": False,
+            }
+        )
+        emit(
+            {
+                "epoch": 2,
+                "total_epochs": 5,
+                "train_loss": 0.5,
+                "val_loss": 0.4,
+                "val_acc": 0.95,
+                "duration_s": 310.0,
+                "memory": memory,
+                "checkpoint_saved": True,
+                "previous_best_val_loss": 0.8,
+                "checkpoint_keys": [
+                    "adapter_config.json",
+                    "adapter_model.safetensors",
+                    "classifier.pt",
+                ],
+            }
+        )
+
+        tel = _RecordingTelemetry()
+        offset = scheduled.drain_progress(progress, 0, tel)
+
+        assert offset == progress.stat().st_size
+        assert len(tel.posted) == 1, "only the checkpoint epoch posts"
+        embed = tel.posted[0]
+        values = {f["name"]: f["value"] for f in embed["fields"]}
+        assert "epoch 2/5" in embed["title"]
+        assert "0.4000" in values["Val loss"]
+        assert values["Uploaded"] == "3/3 files → R2"
+        # Whatever this machine's probe returned must render, not explode.
+        assert isinstance(values["Memory"], str) and values["Memory"]
+
+    def test_batch_exposes_the_progress_flag(self):
+        """--progress-jsonl must exist, or scheduled.py's subprocess call fails
+        at runtime with an unrecognised-option error nothing else would catch."""
+        import inspect
+
+        from train import scheduler
+
+        assert "progress_jsonl" in inspect.signature(scheduler.batch).parameters

@@ -20,8 +20,8 @@ the mountain-specific instance.
 
    Labels arrive from two surfaces that share one `labels.yaml` (union-merged,
    R2 as source of truth): the bulk classifier UI (`uv run classify start`) and
-   the Discord reaction-labeling bot (👍/⛅/👎 on hourly webcam posts — see
-   `BOT.md`). A batch run picks both up with no extra flags.
+   the Discord reaction-labeling bot (👍/⛅/👎 on the Worker's alerts and
+   label requests — see `BOT.md`). A batch run picks both up with no extra flags.
 
    **Scheduled runs:** the robogeosociety/supervisor fires
    `scripts/scheduled-train.sh` (→ `python -m train.scheduled`) on the mini
@@ -53,3 +53,27 @@ the mountain-specific instance.
    previously tracked, which dirtied the mini's checkout on every scheduled
    run and let the committed copy drift stale; R2 `checkpoints/` is the single
    source of truth and `load_checkpoint` falls back to it.
+
+## Run telemetry
+
+An unattended run reports to #mountain as it goes (`train/scheduled.py`), not
+just at the end:
+
+- **One start message**, edited in place with the final metrics when the run
+  finishes — best val loss and accuracy vs the previous run, dataset counts,
+  duration breakdown, and **peak memory**.
+- **One message per saved checkpoint**, posted live. Only an *improvement*
+  saves a checkpoint, so a 5-epoch run posts ~3: epoch, val loss with the delta
+  over the previous best, val accuracy, epoch time, memory, and how many of the
+  3 checkpoint files reached R2.
+
+The mechanism is `training batch --progress-jsonl PATH`: the trainer appends one
+fsync'd JSON line per epoch (metrics + `memory_snapshot()` + whether a checkpoint
+was saved), and the scheduler tails that file while the subprocess runs. Without
+the flag the trainer writes nothing extra, so an interactive `just train` is
+unchanged.
+
+Memory probes are best-effort and platform-shaped — peak RSS via `getrusage`
+(bytes on macOS, kilobytes on Linux; both handled), plus MPS allocated/driver or
+CUDA allocated/peak when present. A probe that fails is omitted, never fatal.
+
