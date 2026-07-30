@@ -1,0 +1,120 @@
+# Deploy the mountain-inference Worker from CI.
+#
+# This replaces "a human runs scripts/deploy-worker.sh on the Mac mini" as the
+# normal deploy path. The script survives as the break-glass path (see its
+# header); everything it did — gate, deploy, and record a GitHub Deployment with
+# success/failure status so the Environments page reflects reality — happens
+# here instead, on a runner, from the exact commit that landed on main. The
+# Deployment record comes free with the `environment:` key below; see the note
+# on that block for why this workflow makes no explicit deployments API calls.
+#
+# Auth: `secrets.CLOUDFLARE_API_TOKEN`. The workspace rule is "auth via code
+# flow, never mint tokens", but headless CI cannot run the `wrangler login`
+# browser flow, so a scoped API token is the sanctioned exception. It is created
+# by a human, once, and set with:
+#
+#   gh secret set CLOUDFLARE_API_TOKEN -R robogeosociety/is-the-mountain-out
+#
+# Required token scope is documented in CLAUDE.md → Deployment (Cloudflare).
+# Until that secret exists the deploy job fails at the preflight step with an
+# explicit message — never a wrangler stack trace.
+name: Deploy Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy-worker.yml'
+      - '.github/workflows/worker-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never cancel a deploy in flight — a half-applied wrangler deploy is worse
+  # than a queued one. Later pushes wait their turn.
+  group: deploy-worker-production
+  cancel-in-progress: false
+
+jobs:
+  # Same tests + typecheck that gate every PR. A deploy cannot outrun them.
+  test:
+    uses: ./.github/workflows/worker-ci.yml
+
+  deploy:
+    name: wrangler deploy
+    needs: test
+    runs-on: ubuntu-latest
+    # The `production` GitHub environment does double duty here.
+    #
+    # 1. Approval gate: add a required reviewer to the environment and this job
+    #    waits for it. Nothing in this file has to change.
+    # 2. Deployment bookkeeping. This is the whole reason there are no explicit
+    #    `gh api .../deployments` calls here, unlike scripts/deploy-worker.sh:
+    #    an `environment:` job ALREADY creates a GitHub Deployment and moves it
+    #    in_progress → success/failure, carrying `url` below through as
+    #    environment_url plus a log_url back to this job. Verified on run
+    #    30559836026 — a failed deploy produced exactly the in_progress →
+    #    failure pair the script produces by hand. Recording our own on top
+    #    would put two entries on the Environments page for every deploy.
+    environment:
+      name: production
+      url: ${{ vars.WORKER_URL || 'https://mountain-inference.tommy-b-doerr.workers.dev' }}
+    env:
+      # `secrets` is not available in a job-level `if:`, so the missing-secret
+      # check is a first step rather than a skip condition.
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # Account id is not a secret (it is already in worker/wrangler.toml's
+      # container image ref). Overridable with a repo variable.
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || 'd7adee58513c1b2f770ccaac90cf114f' }}
+      WORKER_URL: ${{ vars.WORKER_URL || 'https://mountain-inference.tommy-b-doerr.workers.dev' }}
+    steps:
+      # Fail loudly and legibly when the secret is absent, and fail FIRST — the
+      # environment's deployment record is already open by the time any step
+      # runs, so the sooner this exits the sooner that record lands on
+      # `failure` instead of sitting `in_progress`.
+      - name: Preflight — CLOUDFLARE_API_TOKEN must be set
+        run: |
+          if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "CLOUDFLARE_API_TOKEN is present."
+            exit 0
+          fi
+          {
+            echo '## Deploy blocked — `CLOUDFLARE_API_TOKEN` is not set'
+            echo
+            echo 'This repository has no Cloudflare credential, so the Worker cannot be'
+            echo 'deployed from CI. Nothing was deployed.'
+            echo
+            echo 'Create a scoped Cloudflare API token (see CLAUDE.md → Deployment'
+            echo '(Cloudflare) for the exact permissions), then run:'
+            echo
+            echo '```sh'
+            echo 'gh secret set CLOUDFLARE_API_TOKEN -R robogeosociety/is-the-mountain-out'
+            echo '```'
+            echo
+            echo 'Until then, deploy with the break-glass path: `scripts/deploy-worker.sh`.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=CLOUDFLARE_API_TOKEN not set::No Cloudflare credential in this repo. Run: gh secret set CLOUDFLARE_API_TOKEN -R ${GITHUB_REPOSITORY} (see CLAUDE.md for the required token scope). Nothing was deployed."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install dependencies
+        working-directory: worker
+        run: npm ci || npm ci --omit=optional --ignore-scripts
+
+      - name: wrangler deploy
+        working-directory: worker
+        run: npx wrangler deploy
+
+      - name: Summary
+        if: success()
+        run: echo "Deployed \`$GITHUB_SHA\` → $WORKER_URL" >> "$GITHUB_STEP_SUMMARY"

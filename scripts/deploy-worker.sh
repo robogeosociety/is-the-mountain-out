@@ -1,12 +1,27 @@
 #!/usr/bin/env bash
-# Deploy the mountain-inference Worker + container via wrangler, and record a
-# GitHub Deployment so the repo's Environments page and the deployed commit show
-# deploy history plus the live URL.
+# BREAK-GLASS deploy path — NOT the normal one.
 #
-# This is the wrangler-direct deploy path (auth via `wrangler login`); it does
-# NOT use Terraform. The container image must already be in the Cloudflare
-# managed registry and referenced by worker/wrangler.toml — build/push it with
-# `wrangler containers push` first (see worker/wrangler.toml and the README).
+# The normal deploy is CI: .github/workflows/deploy-worker.yml runs the worker
+# tests + typecheck and then `wrangler deploy` on every push to main touching
+# worker/**, recording the same GitHub Deployment this script does. Prefer a
+# push to main, or `gh workflow run deploy-worker.yml`, over running this.
+#
+# Use this script only when CI cannot: GitHub Actions is down, the repo's
+# CLOUDFLARE_API_TOKEN is missing/expired, or you need to ship an uncommitted
+# working tree in an emergency. Because it deploys whatever is on YOUR disk, a
+# run from a dirty tree puts code in production that exists in no commit — the
+# GitHub Deployment it records will point at a ref that does not match the live
+# Worker. Commit first if at all possible.
+#
+# Deploys the mountain-inference Worker + container via wrangler and records a
+# GitHub Deployment, so the repo's Environments page and the deployed commit
+# show deploy history plus the live URL.
+#
+# Auth is `wrangler login` (interactive OAuth), unlike CI, which uses the
+# scoped CLOUDFLARE_API_TOKEN secret. It does NOT use Terraform. The container
+# image must already be in the Cloudflare managed registry and referenced by
+# worker/wrangler.toml — build/push it with `wrangler containers push` first
+# (see worker/wrangler.toml and the README).
 #
 # The GitHub Deployment is best-effort: a gh/API hiccup logs a warning but never
 # blocks the actual deploy. A failed `wrangler deploy` marks the deployment
@@ -34,6 +49,13 @@ command -v npx >/dev/null 2>&1 || { echo "npx (Node.js) not found in PATH" >&2; 
 
 REF="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 DEPLOY_ID=""
+
+warn "break-glass path — the normal deploy is CI (.github/workflows/deploy-worker.yml)."
+warn "Prefer: push to main (worker/** changes) or \`gh workflow run deploy-worker.yml\`."
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]; then
+  warn "working tree is DIRTY: this deploys code that exists in no commit, and the"
+  warn "GitHub Deployment recorded for ${REF:0:7} will not match what goes live."
+fi
 
 create_deployment() {
   local body
