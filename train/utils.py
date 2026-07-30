@@ -1,3 +1,4 @@
+import logging
 import cv2
 import torch
 import numpy as np
@@ -56,8 +57,8 @@ class WeatherFetcher:
             if response.status_code == 200:
                 lines = response.text.strip().split("\n")
                 return lines[-1] if lines else None
-        except Exception as e:
-            print(f"Error fetching METAR: {e}")
+        except requests.RequestException as e:
+            logging.warning(f"Error fetching METAR: {e}")
         return None
 
     def parse_metar_to_vector(self, metar_text: str) -> torch.Tensor:
@@ -74,8 +75,15 @@ class WeatherFetcher:
                         if layers
                         else 1.0
                     )
-            except Exception:
-                pass
+            except (Metar.ParserError, AttributeError, IndexError, ValueError) as e:
+                # Live METAR text off the NOAA feed is sometimes truncated or
+                # malformed (station outage, mid-write scrape, format drift).
+                # Metar.Metar() wraps any internal parse failure as ParserError
+                # in strict mode; AttributeError/IndexError/ValueError cover the
+                # sky-layer/value() lookups above on a report that parsed but has
+                # an unexpected shape. Fall back to the neutral defaults already
+                # set above rather than taking down the training loop.
+                logging.warning(f"Could not parse METAR text {metar_text!r}: {e}")
         return torch.tensor([vis, ceil], dtype=torch.float32)
 
     def get_weather_vector(self) -> torch.Tensor:
