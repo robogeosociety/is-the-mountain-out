@@ -112,3 +112,74 @@ def test_live_training_loop_cycle(mock_sleep, mock_weather_cls, mock_webcam):
                 trainer.live_training_loop(label=1)
 
             assert mock_stream.capture_to_tensor.call_count == 1
+
+
+class TestStratifiedSplit:
+    """The split is the reason the old val numbers were not trustworthy.
+
+    It was already stratified — but it ran AFTER oversampling, so the same
+    minority frame landed in both train and val ~8 times over, and it was
+    unseeded, so no two runs' val metrics described the same val set.
+    """
+
+    # The measured real balance (2010 R2 labels, 2026-07-30).
+    REAL = {
+        0: [f"n{i}" for i in range(1735)],
+        1: [f"f{i}" for i in range(111)],
+        2: [f"p{i}" for i in range(164)],
+    }
+
+    def _split(self, by_class=None, seed=1337, fraction=0.15):
+        import random
+
+        from train.scheduler import stratified_split
+
+        return stratified_split(
+            by_class if by_class is not None else self.REAL,
+            val_fraction=fraction,
+            rng=random.Random(seed),
+        )
+
+    def test_no_item_is_in_both_sides(self):
+        """The leak test. This is the whole point."""
+        train, val = self._split()
+        for cls in train:
+            assert not (set(train[cls]) & set(val[cls]))
+
+    def test_every_class_is_represented_in_val(self):
+        _, val = self._split()
+        assert len(val[0]) == 260
+        assert len(val[1]) == 17  # Full — the class that motivated stratifying
+        assert len(val[2]) == 25
+
+    def test_split_is_deterministic_for_a_given_seed(self):
+        assert self._split(seed=1337) == self._split(seed=1337)
+
+    def test_a_different_seed_draws_a_different_val_set(self):
+        _, a = self._split(seed=1337)
+        _, b = self._split(seed=7)
+        assert a[1] != b[1]
+
+    def test_split_ignores_input_ordering(self):
+        shuffled = {cls: list(reversed(items)) for cls, items in self.REAL.items()}
+        assert self._split(shuffled) == self._split()
+
+    def test_nothing_is_lost_or_duplicated(self):
+        train, val = self._split()
+        for cls, items in self.REAL.items():
+            assert sorted(train[cls] + val[cls]) == sorted(items)
+
+    def test_a_singleton_class_stays_in_train(self):
+        # Spending the only example on val makes the class untrainable AND its
+        # recall a coin flip — worst of both.
+        train, val = self._split({0: ["a", "b", "c", "d"], 1: ["only"]})
+        assert train[1] == ["only"]
+        assert val[1] == []
+
+    def test_an_empty_class_is_survivable(self):
+        train, val = self._split({0: ["a", "b"], 1: []})
+        assert train[1] == [] and val[1] == []
+
+    def test_a_two_item_class_gives_one_to_each_side(self):
+        train, val = self._split({1: ["a", "b"]})
+        assert len(train[1]) == 1 and len(val[1]) == 1
