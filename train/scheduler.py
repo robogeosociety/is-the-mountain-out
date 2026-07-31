@@ -1,3 +1,4 @@
+import os
 import subprocess
 import time
 from datetime import datetime
@@ -12,6 +13,47 @@ from train.model import ConvNextLoRAModel
 from train.utils import WeatherFetcher, WebcamStream
 
 app = typer.Typer()
+
+
+def memory_snapshot() -> dict:
+    """Process + accelerator memory right now, in MB.
+
+    Best-effort by construction: a training run must never fail because a
+    telemetry probe did. Every key is optional, and callers render whatever is
+    present.
+    """
+    import sys
+
+    snapshot: dict[str, float] = {}
+    try:
+        import resource
+
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # ru_maxrss is BYTES on macOS and KILOBYTES on Linux — the classic
+        # 1024x reporting bug if you assume one of them.
+        divisor = 1024**2 if sys.platform == "darwin" else 1024
+        snapshot["rss_peak_mb"] = round(peak / divisor, 1)
+    except Exception:  # noqa: BLE001 — probe only
+        pass
+    try:
+        if torch.backends.mps.is_available() and hasattr(torch, "mps"):
+            snapshot["mps_allocated_mb"] = round(
+                torch.mps.current_allocated_memory() / 1024**2, 1
+            )
+            if hasattr(torch.mps, "driver_allocated_memory"):
+                snapshot["mps_driver_mb"] = round(
+                    torch.mps.driver_allocated_memory() / 1024**2, 1
+                )
+        elif torch.cuda.is_available():
+            snapshot["cuda_allocated_mb"] = round(
+                torch.cuda.memory_allocated() / 1024**2, 1
+            )
+            snapshot["cuda_peak_mb"] = round(
+                torch.cuda.max_memory_allocated() / 1024**2, 1
+            )
+    except Exception:  # noqa: BLE001 — probe only
+        pass
+    return snapshot
 
 
 class Trainer:
@@ -142,6 +184,13 @@ def batch(
         help="Write a machine-readable run summary (metrics, uploaded checkpoint "
         "keys, ok/empty/no-improvement status) to this path — for unattended runs.",
     ),
+    progress_jsonl: str | None = typer.Option(
+        None,
+        "--progress-jsonl",
+        help="Append one JSON line per epoch (metrics + memory + whether a "
+        "checkpoint was saved) as the run proceeds, so a supervisor can report "
+        "progress live instead of waiting for --json-summary at the end.",
+    ),
 ):
     """Runs training using a labels index. Pass --labels path/to/labels.yaml or a folder containing labels.yaml."""
     from datetime import UTC, datetime
@@ -173,6 +222,27 @@ def batch(
         with open(tmp, "w") as f:
             json.dump(summary, f, indent=2)
         tmp.rename(out)
+
+    def _emit_progress(event: dict) -> None:
+        """Append one progress line and get it on disk immediately.
+
+        A reader is tailing this file while the run is in flight, so the write
+        is flushed and fsync'd — buffered lines would arrive in a clump at exit,
+        which is exactly the latency this option exists to remove. Append-only
+        and line-atomic: the reader consumes whole lines and ignores a partial
+        tail. Never raises; telemetry must not be able to fail a run.
+        """
+        if not progress_jsonl:
+            return
+        try:
+            path = Path(progress_jsonl)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a") as f:
+                f.write(json.dumps(event) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+        except OSError as exc:
+            print(f"  (progress telemetry write failed, continuing: {exc})")
 
     trainer = Trainer(config, fresh=fresh)
 
@@ -563,24 +633,37 @@ def batch(
             print(
                 f"  Epoch {epoch + 1}: train_loss={avg_loss:.4f}  val_loss={val_loss:.4f}  val_acc={val_acc:.1%}"
             )
-            per_epoch.append(
-                {
-                    "epoch": epoch + 1,
-                    "train_loss": avg_loss,
-                    "val_loss": val_loss,
-                    "val_acc": val_acc,
-                    "duration_s": round(time.monotonic() - epoch_started, 1),
-                }
-            )
+            record = {
+                "epoch": epoch + 1,
+                "total_epochs": epochs,
+                "train_loss": avg_loss,
+                "val_loss": val_loss,
+                "val_acc": val_acc,
+                "duration_s": round(time.monotonic() - epoch_started, 1),
+                "memory": memory_snapshot(),
+                "checkpoint_saved": False,
+            }
+            # The same dict object goes into per_epoch, so the checkpoint flags
+            # set below also land in --json-summary.
+            per_epoch.append(record)
 
             if val_loss < best_val_loss:
+                previous_best = None if best_val_loss == float("inf") else best_val_loss
                 best_val_loss = val_loss
                 best_epoch = epoch + 1
                 best_val_acc = val_acc
                 uploaded_keys = trainer.model_wrapper.save_checkpoint(
                     trainer.config_loader.checkpoint_dir, storage=storage
                 )
+                record["checkpoint_saved"] = True
+                record["previous_best_val_loss"] = previous_best
+                record["checkpoint_keys"] = list(uploaded_keys)
                 print(f"  ↳ Best model saved (val_loss={val_loss:.4f})")
+
+            # Emitted AFTER the save attempt so `checkpoint_saved` is truthful:
+            # a reader posts on this line and must not announce a checkpoint
+            # that had not been written yet.
+            _emit_progress(record)
 
     if state_file.exists():
         state = {

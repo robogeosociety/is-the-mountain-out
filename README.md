@@ -14,7 +14,7 @@ Append `?debug` to see confidence bars and the raw METAR readout.
 flowchart LR
   subgraph local["Mac mini (local)"]
     collector["collect collector<br/>(Nomad, on-demand)"]
-    labeler["bot labeler<br/>(Nomad, hourly daylight)"]
+    labeler["bot labeler<br/>(Nomad, always-on)"]
     trainer["training batch<br/>(MPS, on-demand)"]
   end
 
@@ -30,10 +30,10 @@ flowchart LR
   metar(["NOAA METAR (KSEA)"]) --> collector
   collector -- "captures + metar" --> r2priv
 
-  webcam --> labeler
-  metar --> labeler
-  labeler -- "captures + 👍⛅👎 labels" --> r2priv
-  labeler <-- "posts / reactions" --> discord(["Discord channel"])
+  worker -- "visibility change: frame + seeded 👍⛅👎 (as the bot)" --> discord(["Discord channel"])
+  worker -- "announced frame + metar" --> r2priv
+  discord -- "reactions" --> labeler
+  labeler -- "👍⛅👎 labels" --> r2priv
 
   r2priv -- "labels + cached images" --> trainer
   trainer -- "checkpoint" --> r2priv
@@ -61,6 +61,7 @@ sequenceDiagram
   participant M as NOAA METAR
   participant R2p as R2 (private)
   participant R2u as R2 (public)
+  participant D as Discord
 
   Cron->>W: scheduled() fires
   W->>C: POST /predict (DO binding)
@@ -73,6 +74,10 @@ sequenceDiagram
   C->>C: model.predict()
   C-->>W: PredictionState (class, confidence, weather)
   W->>R2u: PUT state.json
+  opt visibility changed, confirmed on 2 consecutive ticks
+    W->>R2p: PUT announced frame + metar
+    W->>D: POST embed as the labeler bot + seed 👍⛅👎
+  end
   W->>R2u: PUT history.jsonl (GET + append + PUT)
   Note over W,R2u: SPA picks up next 60s poll
 ```
@@ -142,8 +147,8 @@ inference/            FastAPI server + Dockerfile for the Cloudflare Container
 worker/               Cloudflare Worker source (TypeScript) + wrangler.toml
 web/                  Public SPA (Vite + React), deployed by Cloudflare Pages
 ui/                   Internal classifier UI for bulk labeling (Vite + React)
-terraform/            Cloudflare Worker deploy (R2 buckets managed manually)
-scripts/              deploy-inference.sh — one-command Worker redeploy
+.github/workflows/    CI — ruff, worker tests, and the Worker deploy to Cloudflare
+scripts/              deploy-worker.sh — break-glass manual Worker redeploy
 ```
 
 ## Commands
@@ -165,15 +170,35 @@ uv run classify start [data_folder]
 uv run classify stop
 
 # Discord reaction-labeling bot (see BOT.md; needs cf.env)
-uv run --group bot bot run          # hourly daylight posts + reaction labeling
+uv run --group bot bot run          # reaction labeling + startup sweep
 uv run --group bot bot post-once    # post one labelable capture, then exit
 
 # Inference (server-side, used by the Cloudflare Container)
 uv run python tools/predict_state.py --config mountain.toml
 
-# Cloudflare Worker redeploy
-scripts/deploy-inference.sh   # see script header for required env vars
+# Cloudflare Worker tests (also run on every PR by .github/workflows/worker-ci.yml)
+cd worker && npm ci && npm test && npm run typecheck
 ```
+
+## Deploying the Worker
+
+**The Worker deploys from CI.** Pushing to `main` with changes under `worker/**`
+runs `.github/workflows/deploy-worker.yml`: worker tests + typecheck, then
+`wrangler deploy` into the `production` GitHub environment, recording a GitHub
+Deployment so the [Environments page](https://github.com/robogeosociety/is-the-mountain-out/deployments)
+shows what is actually live. Redeploy the current `main` by hand with:
+
+```bash
+gh workflow run deploy-worker.yml
+```
+
+CI authenticates with the repo secret `CLOUDFLARE_API_TOKEN` (see `CLAUDE.md` →
+Deployment (Cloudflare) for the required token scope). Without it the deploy job
+fails at its preflight step with an explicit message and deploys nothing.
+
+`scripts/deploy-worker.sh` is the **break-glass** path — for when Actions is
+down, the token is expired, or an uncommitted tree must ship. It uses your own
+`wrangler login` session and warns before it runs.
 
 ## Configuration
 
@@ -191,15 +216,16 @@ R2 S3 credentials (`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) live in `cf.env` 
 | Component | Host | Trigger |
 |---|---|---|
 | Capture collector | Mac mini (Nomad) | Cron, on-demand |
-| Discord labeling bot | Mac mini (Nomad) | Always-on (posts hourly in daylight) |
+| Discord labeling bot | Mac mini (Nomad) | Always-on (harvests reactions; the Worker does the posting) |
 | Training | Mac mini (MPS) | On-demand (`uv run training batch`) |
 | Inference cron | Cloudflare Worker | `*/15 * * * *` |
 | Inference compute | Cloudflare Container | Worker invocation |
 | Storage | Cloudflare R2 | (always) |
 | Public SPA | Cloudflare Pages | (always) |
 | Container image | GHCR | Built by GH Actions on push to main |
+| Worker deploy | GitHub Actions | Push to main touching `worker/**`, or `gh workflow run deploy-worker.yml` |
 
-GitHub's only remaining role is hosting the source repo and the container image registry. Nothing user-facing depends on GitHub Pages, GitHub Actions, or the operator's local machine being available — captures and training are operator-initiated, but the live site keeps serving and predicting on its own.
+GitHub hosts the source repo, the container image registry, and now the Worker's deploy pipeline. Nothing *user-facing* depends on GitHub being available: captures and training are operator-initiated, the live site keeps serving and predicting on its own, and if Actions is down the Worker can still be shipped by hand via `scripts/deploy-worker.sh`.
 
 ## Network access (Mac mini)
 

@@ -6,7 +6,6 @@ mirroring collect/tests/test_storage.py.
 
 import json
 from datetime import UTC, datetime
-from datetime import time as dtime
 from unittest.mock import patch
 
 import pytest
@@ -95,10 +94,9 @@ class TestFooter:
 
 BASE_CONFIG = {
     "bot": {
-        "post_interval_seconds": 1800,
+        "sweep_hours": 24,
         "state_url": "https://example.com/state.json",
     },
-    "webcam": {"latitude": 47.6533, "longitude": -122.3091},
 }
 
 
@@ -113,10 +111,8 @@ class TestBotSettings:
         assert s.token == "tok"
         assert s.channel_id == 1234
         assert s.allowed_user_ids == frozenset({111, 222})
-        assert s.post_interval_seconds == 1800
+        assert s.sweep_hours == 24
         assert s.state_url == "https://example.com/state.json"
-        assert s.latitude == pytest.approx(47.6533)
-        assert s.sweep_hours == 72  # default
 
     def test_missing_token_raises(self):
         with pytest.raises(ValueError, match="DISCORD_BOT_TOKEN"):
@@ -128,63 +124,26 @@ class TestBotSettings:
 
     def test_empty_allowlist_and_bot_section_optional(self):
         env = {"DISCORD_BOT_TOKEN": "tok", "DISCORD_CHANNEL_ID": "9"}
-        s = BotSettings.from_mapping({"webcam": {}}, env)
+        s = BotSettings.from_mapping({}, env)
         assert s.allowed_user_ids == frozenset()
-        assert s.post_interval_seconds == 3600
+        assert s.sweep_hours == 72  # default
+        assert s.state_url == ""
 
-    def test_fixed_window_parsed(self):
-        cfg = {"bot": {"window_start": "06:00", "window_end": "21:00"}, "webcam": {}}
+    def test_retired_posting_schedule_keys_are_ignored(self):
+        # The bot no longer posts on a schedule; a config left over from when it
+        # did must still load rather than blow up on an unknown key.
+        cfg = {
+            "bot": {
+                "post_interval_seconds": 1800,
+                "window_start": "06:00",
+                "window_end": "21:00",
+                "timezone": "America/Los_Angeles",
+            }
+        }
         env = {"DISCORD_BOT_TOKEN": "t", "DISCORD_CHANNEL_ID": "1"}
         s = BotSettings.from_mapping(cfg, env)
-        assert s.window_start == dtime(6, 0)
-        assert s.window_end == dtime(21, 0)
-
-
-def _settings(**overrides) -> BotSettings:
-    base = {
-        "token": "t",
-        "channel_id": 1,
-        "allowed_user_ids": frozenset(),
-        "latitude": 47.6533,
-        "longitude": -122.3091,
-        "timezone": "America/Los_Angeles",
-    }
-    base.update(overrides)
-    return BotSettings(**base)
-
-
-# ---------- Posting schedule ----------
-
-
-class TestSchedule:
-    def test_due_when_never_posted(self):
-        assert labeler.next_post_due(None, datetime.now(UTC), 3600)
-
-    def test_not_due_within_interval(self):
-        now = datetime(2026, 7, 1, 12, 30, tzinfo=UTC)
-        last = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
-        assert not labeler.next_post_due(last, now, 3600)
-
-    def test_due_after_interval(self):
-        now = datetime(2026, 7, 1, 13, 0, tzinfo=UTC)
-        last = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
-        assert labeler.next_post_due(last, now, 3600)
-
-    def test_fixed_window(self):
-        s = _settings(window_start=dtime(6, 0), window_end=dtime(21, 0))
-        noon_pt = datetime(2026, 7, 1, 19, 0, tzinfo=UTC)  # 12:00 PDT
-        midnight_pt = datetime(2026, 7, 1, 7, 30, tzinfo=UTC)  # 00:30 PDT
-        assert labeler.in_daylight_window(s, noon_pt)
-        assert not labeler.in_daylight_window(s, midnight_pt)
-
-    def test_solar_window_seattle(self):
-        # Real astral computation at the webcam's coordinates: Seattle summer
-        # noon is inside civil dawn→dusk, 1 AM is not.
-        s = _settings()
-        noon_pt = datetime(2026, 7, 1, 19, 0, tzinfo=UTC)
-        one_am_pt = datetime(2026, 7, 1, 8, 0, tzinfo=UTC)
-        assert labeler.in_daylight_window(s, noon_pt)
-        assert not labeler.in_daylight_window(s, one_am_pt)
+        assert s.channel_id == 1
+        assert not hasattr(s, "post_interval_seconds")
 
 
 # ---------- Prediction fetch ----------

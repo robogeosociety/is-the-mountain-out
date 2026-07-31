@@ -43,12 +43,8 @@ cache_dir = ".r2cache"
 
 [bot]
 # Discord reaction-labeling bot (BOT.md). Secrets + channel/user ids live in
-# cf.env; this section is behavior tuning only.
-post_interval_seconds = 3600 # one labelable capture per hour
+# cf.env; this section is behavior tuning only. The bot never posts on a
+# schedule — the Worker's visibility-change notifications are the labeling
+# surface — so there is no posting interval or daylight window to tune.
 sweep_hours = 72 # startup sweep re-reads this much channel history for missed reactions
-state_url = "https://pub-66d3d1f139004e29b2afcb5fba49bdb3.r2.dev/state.json" # public bucket; posts include the model's live prediction
-timezone = "America/Los_Angeles"
-# Posting window defaults to civil dawn→dusk at the webcam's coordinates (astral).
-# Uncomment both to force a fixed local-time window instead:
-# window_start = "06:00"
-# window_end = "21:00"
+state_url = "https://pub-66d3d1f139004e29b2afcb5fba49bdb3.r2.dev/state.json" # public bucket; `bot post-once` shows the model's live prediction

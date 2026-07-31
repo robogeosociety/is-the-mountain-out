@@ -14,7 +14,18 @@
 // directly — no GitHub Contents API in the inference path.
 
 import { Container, getContainer } from "@cloudflare/containers";
-import { notifyDiscordTest, notifyMountainVisibility } from "./discord-mountain-notify";
+import {
+  notifyDiscordTest,
+  notifyLabelRequest,
+  notifyMountainVisibility,
+} from "./discord-mountain-notify";
+import {
+  DEFAULT_OPTIONS,
+  INITIAL_NOTIFY_STATE,
+  decideTransition,
+  type DecisionOptions,
+  type NotifyState,
+} from "./transition";
 
 interface Env {
   INFERENCE_CONTAINER: DurableObjectNamespace<InferenceContainer>;
@@ -22,10 +33,18 @@ interface Env {
   CAPTURE_BUCKET: R2Bucket;
   R2_ACCESS_KEY_ID: string;
   R2_SECRET_ACCESS_KEY: string;
-  // Discord webhook URL the Worker posts visibility transitions to. Optional so
-  // a missing secret degrades to a logged skip rather than a thrown error. Set
-  // out-of-band with `wrangler secret put DISCORD_WEBHOOK_URL`.
-  DISCORD_WEBHOOK_URL?: string;
+  // Credentials the Worker posts visibility changes with — as the labeler bot,
+  // so the posts are reaction-labelable (see discord-mountain-notify.ts).
+  // Optional so a missing secret degrades to a logged skip rather than a thrown
+  // error. Set out-of-band with `wrangler secret put`.
+  DISCORD_BOT_TOKEN?: string;
+  DISCORD_CHANNEL_ID?: string;
+  // Alerting policy, tunable without a code change (wrangler.toml [vars]).
+  // ALERT_MIN_CONFIDENCE: binary confidence a held change must clear to be
+  // announced; below it the frame becomes a label request instead.
+  // LABEL_COOLDOWN_HOURS: minimum gap between label requests.
+  ALERT_MIN_CONFIDENCE?: string;
+  LABEL_COOLDOWN_HOURS?: string;
 }
 
 export class InferenceContainer extends Container<Env> {
@@ -67,6 +86,10 @@ type HistoryRecord =
 
 const STATE_KEY = "state.json";
 const HISTORY_KEY = "history.jsonl";
+// Notification bookkeeping (what the channel was last told, plus any flip
+// awaiting confirmation). Separate from state.json so the SPA's contract stays
+// exactly the published prediction — see transition.ts for the state machine.
+const NOTIFY_STATE_KEY = "notify-state.json";
 
 const isoUtc = (d: Date) => d.toISOString().replace(/\.\d{3}Z$/, "Z");
 
@@ -86,15 +109,23 @@ async function publishState(env: Env, state: PredictionState): Promise<void> {
   });
 }
 
-async function getPreviousState(env: Env): Promise<PredictionState | null> {
+async function getNotifyState(env: Env): Promise<NotifyState> {
   try {
-    const obj = await env.STATE_BUCKET.get(STATE_KEY);
-    if (!obj) return null;
-    return JSON.parse(await obj.text()) as PredictionState;
+    const obj = await env.STATE_BUCKET.get(NOTIFY_STATE_KEY);
+    if (!obj) return INITIAL_NOTIFY_STATE;
+    return { ...INITIAL_NOTIFY_STATE, ...(JSON.parse(await obj.text()) as Partial<NotifyState>) };
   } catch (e) {
-    console.warn("failed to read previous state for transition check:", e);
-    return null;
+    // Unreadable bookkeeping re-adopts the current visibility silently rather
+    // than announcing it — a corrupt object must not become a false alert.
+    console.warn("failed to read notify state; re-adopting current visibility:", e);
+    return INITIAL_NOTIFY_STATE;
   }
+}
+
+async function putNotifyState(env: Env, state: NotifyState): Promise<void> {
+  await env.STATE_BUCKET.put(NOTIFY_STATE_KEY, JSON.stringify(state, null, 2) + "\n", {
+    httpMetadata: { contentType: "application/json" },
+  });
 }
 
 // METAR source for persisted transition captures — same NOAA endpoint and
@@ -104,9 +135,13 @@ const METAR_URL = "https://tgftp.nws.noaa.gov/data/observations/metar/stations/K
 // Persist the frame (and METAR) a transition notification announces, under the
 // collector's standard capture-key layout, so a reaction on the notification
 // can label a real stored capture (the labeler bot gates on the key existing).
-// Returns the image key, or null on failure — the notification then falls back
-// to its prose footer and simply isn't labelable, mirroring today's behavior.
-async function persistTransitionCapture(env: Env, state: PredictionState): Promise<string | null> {
+// Returns the key AND the bytes — the notification embeds these exact bytes as
+// an attachment, so what you react to is what gets labeled. Null on failure:
+// the notification then falls back to a prose footer and isn't labelable.
+async function persistTransitionCapture(
+  env: Env,
+  state: PredictionState,
+): Promise<{ key: string; frame: ArrayBuffer } | null> {
   try {
     const frameResp = await fetch(state.webcam_url);
     if (!frameResp.ok) throw new Error(`webcam fetch returned ${frameResp.status}`);
@@ -139,28 +174,71 @@ async function persistTransitionCapture(env: Env, state: PredictionState): Promi
     } catch (e) {
       console.warn("transition METAR persist failed (image kept):", e);
     }
-    return imageKey;
+    return { key: imageKey, frame };
   } catch (e) {
     console.error("transition capture persist failed; notification will not be labelable:", e);
     return null;
   }
 }
 
-// Fire only on the Not Out → visible transition, mirroring tools/detect_mountain.py.
-async function notifyTransition(env: Env, prev: PredictionState | null, next: PredictionState): Promise<void> {
-  if (!next.is_out) return;
-  if (prev?.is_out) return;
-  const visible = (next.confidence?.full ?? 0) + (next.confidence?.partial ?? 0);
-  const label = next.class_name === "full" ? "Full" : "Partial";
-  const captureKey = await persistTransitionCapture(env, next);
-  await notifyMountainVisibility(env, {
-    visible: true,
-    confidence: visible,
+// Binary confidence in the predicted answer: p(out) = full + partial when the
+// mountain is out, p(not out) otherwise. This — not the top *class* score — is
+// the right gate, because "is the mountain out?" is the question being asked;
+// splitting 0.45 Full / 0.45 Partial is a confident YES, not a coin flip.
+function binaryConfidence(state: PredictionState): number {
+  return state.is_out
+    ? (state.confidence?.full ?? 0) + (state.confidence?.partial ?? 0)
+    : (state.confidence?.not_out ?? 0);
+}
+
+function decisionOptions(env: Env): DecisionOptions {
+  const num = (raw: string | undefined, fallback: number) => {
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+  return {
+    alertMinConfidence: num(env.ALERT_MIN_CONFIDENCE, DEFAULT_OPTIONS.alertMinConfidence),
+    labelCooldownMs:
+      num(env.LABEL_COOLDOWN_HOURS, DEFAULT_OPTIONS.labelCooldownMs / 3_600_000) * 3_600_000,
+  };
+}
+
+// One tick, one decision: announce a confirmed+confident change, ask for a
+// label when the model is unsure, or say nothing. See transition.ts for why
+// confidence routes the message rather than merely gating it.
+async function notifyTransition(env: Env, next: PredictionState): Promise<void> {
+  const confidence = binaryConfidence(next);
+  const { kind, next: notifyState } = decideTransition(
+    await getNotifyState(env),
+    next.is_out,
+    confidence,
+    isoUtc(new Date()),
+    decisionOptions(env),
+  );
+  // Persist BEFORE posting: a duplicate alert is worse than a missed one, and
+  // a crash between the two would otherwise re-announce on the next tick. The
+  // cooldown stamp is written the same way, so a failed post costs one ask
+  // rather than unlocking a burst of them.
+  await putNotifyState(env, notifyState);
+  if (kind === "quiet") return;
+
+  const visible = next.is_out;
+  const label = visible ? (next.class_name === "full" ? "Full" : "Partial") : "Not Out";
+  const capture = await persistTransitionCapture(env, next);
+  const payload = {
+    visible,
+    confidence,
     label,
-    imageUrl: next.webcam_url,
     timestamp: next.timestamp_utc,
-    captureKey: captureKey ?? undefined,
-  });
+    frame: capture?.frame,
+    captureKey: capture?.key,
+  };
+
+  if (kind === "label") {
+    await notifyLabelRequest(env, payload);
+    return;
+  }
+  await notifyMountainVisibility(env, { ...payload, imageUrl: next.webcam_url });
 }
 
 async function sendNotificationTest(env: Env): Promise<void> {
@@ -180,11 +258,9 @@ async function tick(env: Env): Promise<void> {
   const startedAt = new Date();
   let record: HistoryRecord;
   try {
-    // Read prev state BEFORE the new write so we can compare for transition detection.
-    const prev = await getPreviousState(env);
     const state = await callContainer(env);
     await publishState(env, state);
-    await notifyTransition(env, prev, state);
+    await notifyTransition(env, state);
     const finishedAt = new Date();
     record = {
       started_at: isoUtc(startedAt),

@@ -11,7 +11,8 @@ default:
 train labels="data/labels.yaml" epochs="5":
     uv run training batch --labels {{labels}} --epochs {{epochs}}
 
-# Run the Discord reaction-labeling bot (needs cf.env — see BOT.md)
+# Run the Discord reaction-labeling bot: harvests reactions on the Worker's
+# visibility notifications into labels.yaml (needs cf.env — see BOT.md)
 bot:
     uv run --group bot bot run --config mountain.toml
 
