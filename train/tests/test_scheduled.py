@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 
 from collect.storage import LocalStorage
 from train import scheduled
+from train.metrics import metrics_from_confusion
 
 
 def _event(ts: str, capture: str = "20260726/x/images/a.jpg") -> dict:
@@ -60,13 +61,21 @@ class TestWatermark:
         assert scheduled.load_watermark(store) == {}
 
 
+# A plausible good-but-not-perfect run: Not Out nearly clean, the two minority
+# classes leaky in both directions — exactly what the accuracy-only embed could
+# not show. 260/16/25 val frames, matching val_class_counts below.
+BEST_METRICS = metrics_from_confusion([[258, 1, 1], [1, 13, 2], [2, 3, 20]])
+
 SUMMARY = {
     "status": "ok",
     "labels_loaded": 2004,
     "class_counts": {"not_out": 1729, "full": 109, "partial": 166},
+    "val_class_counts": {"not_out": 260, "full": 16, "partial": 25},
+    "split_seed": 1337,
     "best_val_loss": 0.0765,
     "best_epoch": 2,
     "best_val_acc": 0.979,
+    "best_val_metrics": BEST_METRICS,
     "prefetch_s": 372.0,
     "per_epoch": [
         {
@@ -81,6 +90,7 @@ SUMMARY = {
             "train_loss": 0.22,
             "val_loss": 0.0765,
             "val_acc": 0.979,
+            "val_metrics": BEST_METRICS,
             "duration_s": 192.0,
         },
     ],
@@ -110,7 +120,12 @@ class TestEmbeds:
         # Time telemetry: total · prefetch · avg per-epoch.
         assert values["Duration"] == "15 min total · prefetch 6.2 min · ~3.1 min/epoch"
         # Accuracy improvement in percentage points, arrows flipped vs loss.
-        assert values["Val accuracy"] == "97.9% — ▲ improved 0.3pt vs last (97.6%)"
+        # The field is labelled with the majority baseline now: 97.9% next to
+        # "86.3% is free" reads very differently from 97.9% on its own.
+        assert (
+            values["Val accuracy (majority baseline 86.3%)"]
+            == "97.9% — ▲ improved 0.3pt vs last (97.6%)"
+        )
 
     def test_acc_regression_and_first_run_text(self):
         assert "▼ regressed 1.9pt" in scheduled._acc_delta_text(0.957, 0.976)
@@ -122,7 +137,7 @@ class TestEmbeds:
         legacy = {k: v for k, v in SUMMARY.items() if k != "best_val_acc"}
         embed = scheduled.result_embed(legacy, 1, previous_best=None, duration_s=600)
         values = {f["name"]: f["value"] for f in embed["fields"]}
-        assert values["Val accuracy"].startswith("97.9%")
+        assert values["Val accuracy (majority baseline 86.3%)"].startswith("97.9%")
 
     def test_duration_text_without_breakdown(self):
         assert scheduled._duration_text(600, {}) == "10 min total"
@@ -385,3 +400,128 @@ class TestEmitterConsumerContract:
         from train import scheduler
 
         assert "progress_jsonl" in inspect.signature(scheduler.batch).parameters
+
+    def test_batch_exposes_a_seed_option(self):
+        """An unseeded split redraws val every week and makes deltas noise."""
+        import inspect
+
+        from train import scheduler
+
+        assert "seed" in inspect.signature(scheduler.batch).parameters
+
+
+class TestPerClassTelemetry:
+    """Macro-F1, per-class recall and the visible collapse in the embeds.
+
+    Raw accuracy is not evidence on this label set: 86.3% of it is available by
+    always answering "Not Out". These assertions pin the demotion.
+    """
+
+    def test_macro_f1_is_the_headline_field(self):
+        embed = scheduled.result_embed(
+            SUMMARY, 4, previous_best=0.0782, duration_s=900, previous_best_acc=0.976
+        )
+        names = [f["name"] for f in embed["fields"]]
+        assert names[2] == "Macro-F1 (headline)"
+        # Accuracy still present, but after the per-class block.
+        assert names.index("Macro-F1 (headline)") < names.index("Per class")
+        assert names.index("Per class") < names.index(
+            "Val accuracy (majority baseline 86.3%)"
+        )
+
+    def test_per_class_recall_names_full_and_partial_with_their_support(self):
+        embed = scheduled.result_embed(SUMMARY, 1, previous_best=None, duration_s=60)
+        values = {f["name"]: f["value"] for f in embed["fields"]}
+        per_class = values["Per class"]
+        assert "**Full** recall 81% · precision 76% (n=16)" in per_class
+        assert "**Partial** recall 80% · precision 87% (n=25)" in per_class
+        assert "**Not Out**" in per_class
+
+    def test_visible_collapse_leads_with_precision(self):
+        embed = scheduled.result_embed(SUMMARY, 1, previous_best=None, duration_s=60)
+        values = {f["name"]: f["value"] for f in embed["fields"]}
+        # 38 correct visible, 2 Not Out frames announced visible => 95% precision.
+        assert values["Mountain visible (Full+Partial)"].startswith("precision 95%")
+        assert "n=41 visible frames in val" in values["Mountain visible (Full+Partial)"]
+
+    def test_confusion_is_one_code_block_not_nine_fields(self):
+        embed = scheduled.result_embed(SUMMARY, 1, previous_best=None, duration_s=60)
+        values = {f["name"]: f["value"] for f in embed["fields"]}
+        block = values["Confusion (rows = truth)"]
+        assert block.startswith("```\n") and block.endswith("\n```")
+        assert len(embed["fields"]) < 15, "Discord caps embeds at 25 fields"
+
+    def test_val_split_counts_are_shown_next_to_the_dataset(self):
+        embed = scheduled.result_embed(SUMMARY, 1, previous_best=None, duration_s=60)
+        values = {f["name"]: f["value"] for f in embed["fields"]}
+        assert "val split: 260/16/25 (seed 1337)" in values["Dataset"]
+
+    def test_macro_f1_delta_arrows_match_higher_is_better(self):
+        assert "▲ improved 0.040" in scheduled._f1_delta_text(0.840, 0.800)
+        assert "▼ regressed 0.040" in scheduled._f1_delta_text(0.760, 0.800)
+        assert "unchanged" in scheduled._f1_delta_text(0.800, 0.8001)
+        assert "no previous run" in scheduled._f1_delta_text(0.800, None)
+
+    def test_a_class_absent_from_val_says_so(self):
+        metrics = metrics_from_confusion([[10, 0, 0], [0, 0, 0], [1, 0, 4]])
+        assert "**Full** — absent from val set" in scheduled._recall_text(metrics)
+
+    def test_checkpoint_embed_carries_per_class_recall(self):
+        record = dict(TestCheckpointEmbed.RECORD, val_metrics=BEST_METRICS)
+        values = {
+            f["name"]: f["value"] for f in scheduled.checkpoint_embed(record)["fields"]
+        }
+        assert "**Full** recall 81%" in values["Per class"]
+        assert values["Macro-F1 / balanced acc"].startswith("0.8")
+
+
+class TestBackwardCompatibility:
+    """`--json-summary` consumers must tolerate summaries written before this
+    landed — the same fallback contract `best_val_acc` already had."""
+
+    LEGACY = {
+        k: v
+        for k, v in SUMMARY.items()
+        if k not in ("best_val_metrics", "val_class_counts", "split_seed")
+    }
+
+    def test_legacy_summary_still_renders(self):
+        legacy = dict(
+            self.LEGACY,
+            per_epoch=[
+                {k: v for k, v in e.items() if k != "val_metrics"}
+                for e in self.LEGACY["per_epoch"]
+            ],
+        )
+        embed = scheduled.result_embed(legacy, 1, previous_best=None, duration_s=60)
+        values = {f["name"]: f["value"] for f in embed["fields"]}
+        assert "predates per-class metrics" in values["Macro-F1 (headline)"]
+        assert "predates per-class metrics" in values["Per class"]
+        # Everything that DID exist still renders normally.
+        assert values["Val accuracy (majority baseline 86.3%)"].startswith("97.9%")
+        assert "val split" not in values["Dataset"]
+
+    def test_metrics_recovered_from_the_best_epoch_when_top_level_is_missing(self):
+        # A run whose summary predates `best_val_metrics` but whose per-epoch
+        # records carry `val_metrics` — the same recovery path `best_val_acc`
+        # already uses.
+        embed = scheduled.result_embed(
+            self.LEGACY, 1, previous_best=None, duration_s=60
+        )
+        values = {f["name"]: f["value"] for f in embed["fields"]}
+        assert "**Full** recall 81%" in values["Per class"]
+
+    def test_checkpoint_embed_without_metrics_is_unchanged(self):
+        embed = scheduled.checkpoint_embed(TestCheckpointEmbed.RECORD)
+        names = [f["name"] for f in embed["fields"]]
+        assert "Per class" not in names
+        assert names == [
+            "Val loss",
+            "Val accuracy",
+            "Epoch time",
+            "Memory",
+            "Uploaded",
+        ]
+
+    def test_watermark_without_macro_f1_does_not_crash_the_delta(self):
+        assert scheduled._f1_delta_text(0.84, None).startswith("0.840")

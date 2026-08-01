@@ -39,6 +39,7 @@ import requests
 
 from bot.labeler import EVENTS_KEY, uncached_storage
 from train.config_loader import ConfigLoader
+from train.metrics import CLASS_LABELS, CLASS_NAMES, format_confusion
 
 WATERMARK_KEY = "labels/train-watermark.json"
 
@@ -143,6 +144,94 @@ def _acc_delta_text(acc: float | None, previous: float | None) -> str:
     return f"{acc:.1%} — {arrow} {abs(delta_pt):.1f}pt vs last ({previous:.1%})"
 
 
+def _f1_delta_text(macro_f1: float | None, previous: float | None) -> str:
+    """Macro-F1 with a run-over-run delta.
+
+    Macro-F1 is the headline because accuracy is not one: on this label set
+    (86% Not Out) a model that never says "out" scores 86% accuracy and 0.31
+    macro-F1. Higher is better, so arrows match `_acc_delta_text`, not the loss
+    delta. Reported to 3 decimals — 2 hides the movement small val classes make.
+    """
+    if macro_f1 is None:
+        return "n/a — run predates per-class metrics"
+    if previous is None:
+        return f"{macro_f1:.3f} — no previous run to compare"
+    delta = macro_f1 - previous
+    if abs(delta) < 0.0005:
+        return f"{macro_f1:.3f} — unchanged vs last"
+    arrow = "▲ improved" if delta > 0 else "▼ regressed"
+    return f"{macro_f1:.3f} — {arrow} {abs(delta):.3f} vs last ({previous:.3f})"
+
+
+def _recall_text(metrics: Mapping[str, Any] | None) -> str:
+    """Per-class recall + precision for the two classes anyone cares about.
+
+    Not Out is included last for completeness, but Full and Partial lead: they
+    are 5.5% and 8.2% of the data, and they are the entire product. `n=` is the
+    val support, printed on purpose — at n≈17 one flipped frame is ~6pt of
+    recall, and a reader who cannot see the denominator will over-read the move.
+    """
+    if not metrics:
+        return "n/a — run predates per-class metrics"
+    per_class = metrics.get("per_class") or {}
+    lines = []
+    for name, label in zip(CLASS_NAMES, CLASS_LABELS, strict=True):
+        stats = per_class.get(name)
+        if not stats:
+            continue
+        if not stats.get("support"):
+            lines.append(f"**{label}** — absent from val set")
+            continue
+        lines.append(
+            f"**{label}** recall {float(stats['recall']):.0%} · "
+            f"precision {float(stats['precision']):.0%} (n={stats['support']})"
+        )
+    return "\n".join(lines) or "n/a"
+
+
+def _visible_text(metrics: Mapping[str, Any] | None) -> str:
+    """The product question: Full+Partial collapsed against Not Out.
+
+    Precision leads because the repo's stated constraint is precision over
+    recall — a false positive is an alert claiming the mountain is out when it
+    is not, which is the failure users actually notice.
+    """
+    if not metrics:
+        return "n/a — run predates per-class metrics"
+    visible = metrics.get("visible")
+    if not visible:
+        return "n/a"
+    return (
+        f"precision {float(visible['precision']):.0%} · "
+        f"recall {float(visible['recall']):.0%} "
+        f"(n={visible.get('support', '?')} visible frames in val)"
+    )
+
+
+def _confusion_text(metrics: Mapping[str, Any] | None) -> str:
+    """A code block, not nine embed fields — 9 fields would eat the embed."""
+    if not metrics or not metrics.get("confusion"):
+        return "n/a — run predates per-class metrics"
+    return f"```\n{format_confusion(dict(metrics))}\n```"
+
+
+def _best_metrics(summary: Mapping[str, Any]) -> dict | None:
+    """The metric block from the epoch that saved the model.
+
+    Older summaries have neither `best_val_metrics` nor per-epoch `val_metrics`
+    — they predate this feature — so every caller must tolerate None, the same
+    way `result_embed` already falls back for `best_val_acc`.
+    """
+    best = summary.get("best_val_metrics")
+    if best:
+        return dict(best)
+    best_epoch = summary.get("best_epoch")
+    for epoch in summary.get("per_epoch") or []:
+        if epoch.get("epoch") == best_epoch and epoch.get("val_metrics"):
+            return dict(epoch["val_metrics"])
+    return None
+
+
 def _gb(mb: float) -> str:
     return f"{mb / 1024:.2f} GB"
 
@@ -188,11 +277,23 @@ def checkpoint_embed(record: Mapping[str, Any]) -> dict:
         else f"▼ {float(previous) - val_loss:.4f} better than {float(previous):.4f}"
     )
     keys = record.get("checkpoint_keys") or []
-    return {
-        "title": f"💾 Checkpoint saved — epoch {record.get('epoch', '?')}/{record.get('total_epochs', '?')}",
-        "color": COLOR_OK if len(keys) == 3 else COLOR_FAILED,
-        "fields": [
-            {"name": "Val loss", "value": f"{val_loss:.4f} — {delta}", "inline": False},
+    metrics = record.get("val_metrics")
+    fields = [
+        {"name": "Val loss", "value": f"{val_loss:.4f} — {delta}", "inline": False},
+    ]
+    if metrics:
+        fields.append(
+            {
+                "name": "Macro-F1 / balanced acc",
+                "value": (
+                    f"{float(metrics.get('macro_f1', 0.0)):.3f} / "
+                    f"{float(metrics.get('balanced_accuracy', 0.0)):.1%}"
+                ),
+                "inline": True,
+            }
+        )
+    fields.extend(
+        [
             {
                 "name": "Val accuracy",
                 "value": f"{float(record.get('val_acc', 0.0)):.1%}",
@@ -203,13 +304,29 @@ def checkpoint_embed(record: Mapping[str, Any]) -> dict:
                 "value": f"{float(record.get('duration_s', 0.0)) / 60:.1f} min",
                 "inline": True,
             },
+        ]
+    )
+    if metrics:
+        # Per-class recall on the checkpoint post too: an improving val loss
+        # with a collapsing Full recall is a regression wearing a green badge,
+        # and this is the message that gets read while the run is still going.
+        fields.append(
+            {"name": "Per class", "value": _recall_text(metrics), "inline": False}
+        )
+    fields.extend(
+        [
             {
                 "name": "Memory",
                 "value": _memory_text(record.get("memory")),
                 "inline": False,
             },
             {"name": "Uploaded", "value": f"{len(keys)}/3 files → R2", "inline": True},
-        ],
+        ]
+    )
+    return {
+        "title": f"💾 Checkpoint saved — epoch {record.get('epoch', '?')}/{record.get('total_epochs', '?')}",
+        "color": COLOR_OK if len(keys) == 3 else COLOR_FAILED,
+        "fields": fields,
         "footer": {"text": "is-the-mountain-out • scheduled training"},
         "timestamp": datetime.now(UTC).isoformat(),
     }
@@ -235,6 +352,7 @@ def result_embed(
     previous_best: float | None,
     duration_s: float,
     previous_best_acc: float | None = None,
+    previous_macro_f1: float | None = None,
 ) -> dict:
     counts = summary.get("class_counts", {})
     dataset = (
@@ -242,6 +360,15 @@ def result_embed(
         f"({counts.get('not_out', '?')}/{counts.get('full', '?')}/{counts.get('partial', '?')} "
         "Not Out/Full/Partial)"
     )
+    val_counts = summary.get("val_class_counts")
+    if val_counts:
+        # The denominator behind every per-class rate below. Without it the
+        # recall numbers look far more precise than 16 val frames can support.
+        dataset += (
+            f"\nval split: {val_counts.get('not_out', '?')}/"
+            f"{val_counts.get('full', '?')}/{val_counts.get('partial', '?')}"
+            f" (seed {summary.get('split_seed', '?')})"
+        )
     best = summary.get("best_val_loss")
     best_epoch = summary.get("best_epoch")
     per_epoch = summary.get("per_epoch") or [{}]
@@ -257,9 +384,16 @@ def result_embed(
         if len(uploaded) == 3
         else f"⚠️ only {len(uploaded)}/3 files uploaded — check logs"
     )
+    metrics = _best_metrics(summary)
+    macro_f1 = metrics.get("macro_f1") if metrics else None
+    balanced = metrics.get("balanced_accuracy") if metrics else None
     return {
         "title": "🧠 Weekly training run",
         "color": COLOR_OK if len(uploaded) == 3 else COLOR_FAILED,
+        # Order is the message. Macro-F1 and per-class recall come FIRST because
+        # raw accuracy on an 86%-majority label set is not evidence the model
+        # works — 86.3% of it is available by always answering "Not Out".
+        # Accuracy stays, demoted, so run-over-run history remains readable.
         "fields": [
             {
                 "name": "Trigger",
@@ -268,12 +402,37 @@ def result_embed(
             },
             {"name": "Dataset", "value": dataset, "inline": False},
             {
+                "name": "Macro-F1 (headline)",
+                "value": _f1_delta_text(macro_f1, previous_macro_f1),
+                "inline": False,
+            },
+            {
+                "name": "Balanced accuracy",
+                "value": (
+                    f"{balanced:.1%} (chance = 33.3%)"
+                    if balanced is not None
+                    else "n/a — run predates per-class metrics"
+                ),
+                "inline": True,
+            },
+            {
+                "name": "Mountain visible (Full+Partial)",
+                "value": _visible_text(metrics),
+                "inline": False,
+            },
+            {"name": "Per class", "value": _recall_text(metrics), "inline": False},
+            {
+                "name": "Confusion (rows = truth)",
+                "value": _confusion_text(metrics),
+                "inline": False,
+            },
+            {
                 "name": "Best val loss",
                 "value": f"{best:.4f} (epoch {best_epoch}) — {_delta_text(best, previous_best)}",
                 "inline": False,
             },
             {
-                "name": "Val accuracy",
+                "name": "Val accuracy (majority baseline 86.3%)",
                 "value": _acc_delta_text(best_val_acc, previous_best_acc),
                 "inline": False,
             },
@@ -528,6 +687,7 @@ def main(config: str, data_root: str, check: bool) -> None:
         telemetry.update(failure_embed(len(pending), reason))
         sys.exit(1)
 
+    best_metrics = _best_metrics(summary) or {}
     save_watermark(
         storage,
         {
@@ -536,6 +696,10 @@ def main(config: str, data_root: str, check: bool) -> None:
             "labels_total": summary.get("labels_loaded"),
             "best_val_loss": summary.get("best_val_loss"),
             "best_val_acc": summary.get("best_val_acc"),
+            # Carried so NEXT week's embed can show a macro-F1 delta. Absent on
+            # watermarks written before this landed — every reader defaults it.
+            "best_macro_f1": best_metrics.get("macro_f1"),
+            "best_balanced_accuracy": best_metrics.get("balanced_accuracy"),
             "epochs": epochs,
         },
     )
@@ -546,6 +710,7 @@ def main(config: str, data_root: str, check: bool) -> None:
             watermark.get("best_val_loss"),
             duration_s,
             previous_best_acc=watermark.get("best_val_acc"),
+            previous_macro_f1=watermark.get("best_macro_f1"),
         )
     )
     print(

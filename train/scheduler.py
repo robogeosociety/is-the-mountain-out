@@ -9,6 +9,7 @@ import typer
 from torch import optim
 
 from train.config_loader import ConfigLoader
+from train.metrics import compute_metrics, summary_line
 from train.model import ConvNextLoRAModel
 from train.utils import WeatherFetcher, WebcamStream
 
@@ -54,6 +55,39 @@ def memory_snapshot() -> dict:
     except Exception:  # noqa: BLE001 — probe only
         pass
     return snapshot
+
+
+def stratified_split(
+    by_class: dict[int, list[str]], val_fraction: float, rng
+) -> tuple[dict[int, list[str]], dict[int, list[str]]]:
+    """Split UNIQUE items per class into (train, val), deterministically.
+
+    Two properties this function exists to guarantee, both of which the previous
+    inline split lacked:
+
+    1. **It runs on unique items, before oversampling.** Oversampling duplicates
+       each minority frame ~8x. Splitting the oversampled list put copies of the
+       same image on both sides, so validation scored the model on frames it had
+       memorised — the mechanism behind a 99.8% val accuracy on a class holding
+       5.5% of the data.
+    2. **It is seeded.** An unseeded split redraws the val set on every run, so
+       week-over-week metric deltas measured the dice, not the model.
+
+    A class with a single example keeps it in train: spending it on val would
+    make the class untrainable *and* its recall a coin flip.
+    """
+    train: dict[int, list[str]] = {}
+    val: dict[int, list[str]] = {}
+    for cls, items in by_class.items():
+        # sorted() first so the result depends on the seed, not on dict or
+        # filesystem ordering.
+        shuffled = sorted(items)
+        rng.shuffle(shuffled)
+        n = len(shuffled)
+        n_val = 0 if n < 2 else min(max(1, round(n * val_fraction)), n - 1)
+        val[cls] = shuffled[:n_val]
+        train[cls] = shuffled[n_val:]
+    return train, val
 
 
 class Trainer:
@@ -191,6 +225,14 @@ def batch(
         "checkpoint was saved) as the run proceeds, so a supervisor can report "
         "progress live instead of waiting for --json-summary at the end.",
     ),
+    seed: int = typer.Option(
+        1337,
+        "--seed",
+        help="Seed for the train/val split, oversampling and epoch shuffles. "
+        "Fixed by default so two runs' val metrics are comparable — an unseeded "
+        "split redraws the val set every week and turns run-over-run deltas "
+        "into noise.",
+    ),
 ):
     """Runs training using a labels index. Pass --labels path/to/labels.yaml or a folder containing labels.yaml."""
     from datetime import UTC, datetime
@@ -200,6 +242,7 @@ def batch(
     uploaded_keys: list[str] = []
     best_epoch: int | None = None
     best_val_acc: float | None = None
+    best_val_metrics: dict | None = None
 
     def _write_summary(status: str, **extra) -> None:
         """Atomic (tmp+rename) summary write; a scheduled wrapper parses this
@@ -272,7 +315,6 @@ def batch(
             labels_map = yaml.safe_load(f) or {}
         print(f"Loaded {len(labels_map)} labels from {labels_file}")
 
-    # Strategy: Oversample minority classes (Full = 1, Partial = 2)
     labels_full = {path: label for path, label in labels_map.items() if label == 1}
     labels_partial = {path: label for path, label in labels_map.items() if label == 2}
     labels_not_out = {path: label for path, label in labels_map.items() if label == 0}
@@ -281,34 +323,45 @@ def batch(
         f"Dataset stats: {len(labels_not_out)} Not Out, {len(labels_full)} Full, {len(labels_partial)} Partial"
     )
 
-    # We want a reasonable representation of all visible mountain frames
-    # Target: 1:2:2 ratio (NotOut : Full : Partial) or similar
-    max_not_out = len(labels_not_out)
-
-    final_training_list = []
-    # Add all 'Not Out' once
-    for p, label in labels_not_out.items():
-        final_training_list.append((p, label))
-
-    # Oversample 'Full'
-    if labels_full:
-        full_factor = max(1, max_not_out // (len(labels_full) * 2))
-        for p, label in labels_full.items():
-            for _ in range(full_factor):
-                final_training_list.append((p, label))
-        print(f"  Oversampling 'Full' by {full_factor}x")
-
-    # Oversample 'Partial'
-    if labels_partial:
-        partial_factor = max(1, max_not_out // (len(labels_partial) * 2))
-        for p, label in labels_partial.items():
-            for _ in range(partial_factor):
-                final_training_list.append((p, label))
-        print(f"  Oversampling 'Partial' by {partial_factor}x")
-
     import random
 
-    random.shuffle(final_training_list)
+    rng = random.Random(seed)
+
+    # SPLIT FIRST, THEN OVERSAMPLE.
+    #
+    # This order is the whole point. Oversampling duplicates each minority frame
+    # ~8x; splitting the oversampled list afterwards puts copies of the SAME
+    # image in both train and val, so the model is scored on frames it memorised
+    # — which is how a 5.5%-of-the-data class produced a 99.8% val accuracy.
+    # Splitting the unique labels first keeps val honest, and oversampling only
+    # the train side keeps the class-balance benefit it was added for.
+    train_by_class, val_by_class = stratified_split(
+        {
+            0: list(labels_not_out),
+            1: list(labels_full),
+            2: list(labels_partial),
+        },
+        val_fraction=0.15,
+        rng=rng,
+    )
+
+    val_list = [(p, cls) for cls, paths in val_by_class.items() for p in paths]
+    rng.shuffle(val_list)
+
+    # Oversample the minority classes — TRAIN SIDE ONLY.
+    # Target: roughly 1:2:2 (NotOut : Full : Partial) representation.
+    max_not_out = len(train_by_class[0])
+    final_training_list = [(p, 0) for p in train_by_class[0]]
+    for cls, name in ((1, "Full"), (2, "Partial")):
+        paths = train_by_class[cls]
+        if not paths:
+            continue
+        factor = max(1, max_not_out // (len(paths) * 2))
+        for p in paths:
+            final_training_list.extend([(p, cls)] * factor)
+        print(f"  Oversampling '{name}' by {factor}x")
+
+    rng.shuffle(final_training_list)
 
     print(f"Final training set size: {len(final_training_list)} samples.")
 
@@ -332,7 +385,10 @@ def batch(
 
     if isinstance(storage, CachedR2Storage):
         prefetch_keys = []
-        for rel_path, _ in final_training_list:
+        # Val frames are no longer duplicated inside the training list, so they
+        # have to be prefetched explicitly or every validation pass would fall
+        # back to per-image R2 GETs.
+        for rel_path, _ in final_training_list + val_list:
             prefetch_keys.append(rel_path)
             # Also add METAR file keys (try all fallback patterns)
             img_p = Path(rel_path)
@@ -349,21 +405,27 @@ def batch(
 
     batch_size = 16
 
-    # Stratified train/val split (85/15)
-    from collections import defaultdict
-
-    by_class = defaultdict(list)
-    for item in final_training_list:
-        by_class[item[1]].append(item)
-    train_list, val_list = [], []
-    for cls, items in by_class.items():
-        random.shuffle(items)
-        split = max(1, int(len(items) * 0.15))
-        val_list.extend(items[:split])
-        train_list.extend(items[split:])
-    random.shuffle(train_list)
-    random.shuffle(val_list)
-    print(f"Train/Val split: {len(train_list)} train, {len(val_list)} val")
+    train_list = final_training_list
+    val_class_counts = {
+        name: len(val_by_class[cls])
+        for cls, name in ((0, "not_out"), (1, "full"), (2, "partial"))
+    }
+    train_class_counts_unique = {
+        name: len(train_by_class[cls])
+        for cls, name in ((0, "not_out"), (1, "full"), (2, "partial"))
+    }
+    print(
+        f"Train/Val split (seed {seed}): {len(train_list)} train samples "
+        f"({sum(train_class_counts_unique.values())} unique), {len(val_list)} val"
+    )
+    print(f"  Val per class: {val_class_counts}")
+    if min(val_class_counts.values()) < 20:
+        # Say it out loud: at these counts one flipped frame moves that class's
+        # recall by several points, so small deltas are noise, not progress.
+        print(
+            "  ⚠️ small val classes — per-class recall moves by "
+            f"~{100 / max(1, min(val_class_counts.values())):.0f}pt per frame"
+        )
 
     total_batches = (len(train_list) + batch_size - 1) // batch_size
 
@@ -460,10 +522,18 @@ def batch(
         )
 
     def _run_validation():
-        """Run validation pass batch-by-batch, return average loss and accuracy."""
+        """Validation pass, batch by batch → (loss, accuracy, per-class metrics).
+
+        Predictions and truth are accumulated as plain ints (on CPU, one small
+        list) so the confusion matrix — and everything derived from it — comes
+        out of the same forward passes accuracy already needed. No second pass,
+        no extra memory of consequence.
+        """
         trainer.model_wrapper.model_dict.eval()
         cw = class_weights.to(trainer.device)
         total_loss, correct, total = 0.0, 0, 0
+        all_preds: list[int] = []
+        all_targets: list[int] = []
         buf_img, buf_w, buf_l = [], [], []
 
         def _flush():
@@ -477,9 +547,12 @@ def batch(
             total_loss += torch.nn.functional.cross_entropy(
                 outputs, lb, weight=cw
             ).item() * lb.size(0)
-            correct += (outputs.argmax(1) == lb).sum().item()
+            predicted = outputs.argmax(1)
+            correct += (predicted == lb).sum().item()
             total += lb.size(0)
-            del ib, wb, lb, outputs
+            all_preds.extend(predicted.detach().cpu().tolist())
+            all_targets.extend(lb.detach().cpu().tolist())
+            del ib, wb, lb, outputs, predicted
             if trainer.device == "mps":
                 torch.mps.empty_cache()
 
@@ -495,9 +568,10 @@ def batch(
                     _flush()
                     buf_img, buf_w, buf_l = [], [], []
             _flush()
+        metrics = compute_metrics(all_targets, all_preds)
         if total == 0:
-            return float("nan"), 0.0
-        return total_loss / total, correct / total
+            return float("nan"), 0.0, metrics
+        return total_loss / total, correct / total, metrics
 
     best_val_loss = float("inf")
 
@@ -511,7 +585,7 @@ def batch(
 
         for epoch in range(epochs):
             epoch_started = time.monotonic()
-            random.shuffle(train_list)
+            rng.shuffle(train_list)
             batch_task = progress.add_task(
                 f"[cyan]Epoch {epoch + 1}/{epochs}...", total=total_batches
             )
@@ -623,22 +697,28 @@ def batch(
             )
 
             # Validation
-            val_loss, val_acc = _run_validation()
+            val_loss, val_acc, val_metrics = _run_validation()
+            macro_f1 = val_metrics.get("macro_f1", 0.0)
             progress.remove_task(batch_task)
             progress.update(
                 epoch_task,
                 advance=1,
-                description=f"[green]Epoch {epoch + 1}: train={avg_loss:.4f} val={val_loss:.4f} acc={val_acc:.1%}",
+                description=f"[green]Epoch {epoch + 1}: train={avg_loss:.4f} val={val_loss:.4f} macroF1={macro_f1:.3f}",
             )
             print(
                 f"  Epoch {epoch + 1}: train_loss={avg_loss:.4f}  val_loss={val_loss:.4f}  val_acc={val_acc:.1%}"
             )
+            print(f"    {summary_line(val_metrics)}")
             record = {
                 "epoch": epoch + 1,
                 "total_epochs": epochs,
                 "train_loss": avg_loss,
                 "val_loss": val_loss,
                 "val_acc": val_acc,
+                # Per-class precision/recall/F1, the confusion matrix, macro-F1,
+                # balanced accuracy and the Full+Partial "visible" collapse.
+                # Flows to --json-summary and --progress-jsonl via this dict.
+                "val_metrics": val_metrics,
                 "duration_s": round(time.monotonic() - epoch_started, 1),
                 "memory": memory_snapshot(),
                 "checkpoint_saved": False,
@@ -652,6 +732,7 @@ def batch(
                 best_val_loss = val_loss
                 best_epoch = epoch + 1
                 best_val_acc = val_acc
+                best_val_metrics = val_metrics
                 uploaded_keys = trainer.model_wrapper.save_checkpoint(
                     trainer.config_loader.checkpoint_dir, storage=storage
                 )
@@ -705,8 +786,14 @@ def batch(
         },
         train_n=len(train_list),
         val_n=len(val_list),
+        train_class_counts=train_class_counts_unique,
+        val_class_counts=val_class_counts,
+        split_seed=seed,
         best_val_loss=best_val_loss,
         best_val_acc=best_val_acc,
+        # The headline block: macro-F1 / balanced accuracy / per-class P-R-F1 /
+        # confusion / visible-vs-not-out, from the epoch that saved the model.
+        best_val_metrics=best_val_metrics,
         prefetch_s=prefetch_s,
     )
 

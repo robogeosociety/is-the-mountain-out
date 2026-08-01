@@ -61,6 +61,12 @@ Checkpoints saved to `train/checkpoints/`: `adapter_config.json`, `adapter_model
 
 `WebcamStream` fetches JPEG from the webcam URL and converts directly to a `(1, 3, 224, 224)` tensor (no intermediate disk writes). `WeatherFetcher` queries METAR for KSEA and returns `[visibility_sm, ceiling_ft]`. The scheduler accumulates gradients over `N` captures before stepping (configurable in `mountain.toml`).
 
+The `batch` command splits train/val **stratified per class, on unique labels, before oversampling, and seeded** (`--seed`, default 1337) — `stratified_split()`. That order is load-bearing: minority frames are oversampled ~5-7x, so splitting afterwards (as it did until 2026-07-30) put copies of the same image on both sides and inflated val accuracy. Val numbers from before that change are not comparable.
+
+### Evaluation metrics (`train/metrics.py`)
+
+**Accuracy is not the metric here.** The label set is 86.3% Not Out, so always answering "Not Out" scores 86.3%. Every validation pass builds a 3x3 confusion matrix and derives per-class precision/recall/F1/support, **macro-F1**, **balanced accuracy**, and a **Full+Partial "visible" binary view** — the last being the product question and what the Worker's alerts key on. Pure torch/stdlib arithmetic; scikit-learn stays a `dev`-group dependency. Results flow to `--json-summary` (`best_val_metrics`), each `per_epoch` record (`val_metrics`), `--progress-jsonl`, and the Discord embeds, which lead with macro-F1. All consumers tolerate the fields being absent (older runs). Details + the small-sample caveat: `TRAINING.md`.
+
 ### Data Collection (`collect/collector.py`)
 
 Writes timestamped directories: `data/YYYYMMDD/HHMMSS_us_UTC/{images/,metar/}`. Labels stored in `data/labels.yaml` as `{relative_path: label}`.
@@ -128,7 +134,7 @@ Confidence routes each tick to one of two posts (`worker/src/transition.ts`, boo
 - **Zero-disk training:** Live frames go directly to tensors — never written to disk during live loops.
 - **Dynamic port:** The classifier server picks a free port and writes it to `data/classifier_server.port`; the React UI fetches `config.json` at a relative path to discover it.
 - **MPS device:** Apple Silicon (MPS) is the primary target; falls back to CPU.
-- **Precision over recall:** The system is tuned to minimize false positives (announcing the mountain is out when it isn't).
+- **Precision over recall:** The system is tuned to minimize false positives (announcing the mountain is out when it isn't). Measured as `visible.precision` in `train/metrics.py` — before 2026-07-30 this constraint was stated but never measured.
 ## Pull requests — the "newspaper" framework
 
 PR descriptions follow the **newspaper / information-pyramid** format: one self-contained
