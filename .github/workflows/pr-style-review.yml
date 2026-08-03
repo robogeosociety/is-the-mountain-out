@@ -1,0 +1,84 @@
+name: PR Style Review
+
+# Flexible, judgment-based counterpart to the hard pr-structure-gate. Runs the
+# newspaper framework's *soft* rules through Claude: length budget (with room to
+# double it for genuinely complex code changes), Wired voice, whether mermaid
+# diagrams actually make sense, and linking related open/draft issues. It posts a
+# single advisory comment and NEVER blocks the merge.
+#
+# Auth: CLAUDE_CODE_OAUTH_TOKEN (already set in every owned repo by scripts/sync.sh).
+# Source of truth: robogeosociety/.github. One-click-selectable from the Actions UI.
+# Full rules + voice: PR_FRAMEWORK.md.
+
+on:
+  pull_request:
+    types: [opened, edited, ready_for_review]
+
+# Coalesce a burst of description edits into one review per PR.
+concurrency:
+  group: pr-style-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  style-review:
+    # Skip bots and drafts we aren't ready to review; opt out per-PR with a label.
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      github.actor != 'github-actions[bot]' &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-style-review')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # post the review comment; link issues to the PR
+      issues: write          # cross-link / attach related issues
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Claude style review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are the "newspaper" STYLE EDITOR for pull request
+            #${{ github.event.pull_request.number }} in
+            ${{ github.repository }}.
+
+            A separate hard CI gate (pr-structure-gate) already enforces the required
+            markdown spine — headline, dek, masthead, heading levels, alt text — so do
+            NOT re-check structure. Your job is the flexible, judgment-based layer that
+            a regex can't do. Keep it ADVISORY: suggest, never block; do not request
+            changes in a way that would gate the merge.
+
+            First read the ground truth: PR_FRAMEWORK.md in this repo if present,
+            otherwise fetch
+            https://raw.githubusercontent.com/robogeosociety/.github/main/PR_FRAMEWORK.md .
+            Then read this PR's description and its diff (`gh pr view` / `gh pr diff`).
+
+            Review for:
+
+            1. LENGTH BUDGET (with judgment). Default target is ~1–2 iPad-mini pages.
+               If — and only if — this is a genuinely complex *code* change (large
+               non-prose churn), allow up to ~4 pages: "complex topic → double the
+               description length" is expected, not a violation. Pure docs/vault churn
+               stays at the 2-page default. Flag padding, walls of text, and buried
+               ledes; praise tight ones.
+            2. WIRED VOICE & FLOW. Headline evocative but accurate? Dek stands alone?
+               Pyramid order (Why → What → Flow → Screens → Verification → Risk)?
+            3. DIAGRAMS THAT MAKE SENSE. Sanity-check every mermaid block against the
+               actual diff. If a diagram is nonsensical, mislabeled, contradicts the
+               change, or is oriented horizontally (LR/RL) so it overflows the narrow
+               column, say so specifically and suggest the corrected diagram.
+            4. RELATED ISSUES. Search this repo's OPEN and DRAFT issues for ones this PR
+               relates to. When there's a clear match, attach it to the PR: reference it
+               in your comment as `Related: #N` (or `Closes #N` if this PR resolves it),
+               which cross-links it on GitHub.
+
+            Post exactly ONE concise, actionable review comment with your findings,
+            grouped under the headings above. If the description is already tight and
+            correct, post a short "LGTM — reads clean, no changes needed" instead of
+            manufacturing nitpicks. Do not push commits or edit files.
+          claude_args: |
+            --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh search issues:*),Read,Grep,Glob,WebFetch,mcp__github__issue_read,mcp__github__list_issues,mcp__github__search_issues,mcp__github__add_comment_to_pending_review,mcp__github__pull_request_read"
