@@ -252,3 +252,69 @@ export async function notifyDiscordTest(env: Env): Promise<boolean> {
   };
   return (await postAsBot(env, embed, "test notification")) !== null;
 }
+
+const COLOR_DOWN = 0xe74c3c; // red — the pipeline, not the mountain
+const COLOR_RECOVERED = 0x2ecc71; // green
+
+/** How long a run of failed ticks has lasted, in human units. */
+function outageDuration(since: string | null, now: Date): string {
+  if (!since) return "an unknown period";
+  const ms = now.getTime() - Date.parse(since);
+  if (!Number.isFinite(ms) || ms < 0) return "an unknown period";
+  const hours = ms / 3_600_000;
+  if (hours < 1) return `${Math.max(1, Math.round(ms / 60_000))} minutes`;
+  if (hours < 48) return `${Math.round(hours)} hours`;
+  return `${Math.round(hours / 24)} days`;
+}
+
+/**
+ * Announce that the inference pipeline is down.
+ *
+ * This is deliberately NOT a mountain notification: the embed says nothing
+ * about visibility, because the honest answer during an outage is that we do
+ * not know. It carries the last error verbatim, because the seventeen-day
+ * webcam outage was diagnosable from a single line of it and nobody ever saw
+ * that line.
+ */
+export async function notifyPipelineDown(
+  env: Env,
+  detail: { failures: number; since: string | null; error: string },
+): Promise<boolean> {
+  const now = new Date();
+  const embed: DiscordEmbed = {
+    title: "🚨 Inference pipeline is down",
+    description: [
+      `The */15 inference tick has failed **${detail.failures} times in a row** ` +
+        `(about ${outageDuration(detail.since, now)}).`,
+      "",
+      "`state.json` is frozen at its last good reading, so the site is showing stale data.",
+      "",
+      "**Last error**",
+      "```",
+      detail.error.slice(0, 900),
+      "```",
+    ].join("\n"),
+    color: COLOR_DOWN,
+    footer: { text: "is-the-mountain-out • Pipeline health" },
+    timestamp: now.toISOString(),
+  };
+  return (await postAsBot(env, embed, "pipeline-down alert")) !== null;
+}
+
+/** Close the loop: the pipeline that was announced broken is publishing again. */
+export async function notifyPipelineRecovered(
+  env: Env,
+  detail: { failures: number; since: string | null },
+): Promise<boolean> {
+  const now = new Date();
+  const embed: DiscordEmbed = {
+    title: "✅ Inference pipeline recovered",
+    description:
+      `Publishing again after **${detail.failures} failed ticks** ` +
+      `(about ${outageDuration(detail.since, now)}). \`state.json\` is live.`,
+    color: COLOR_RECOVERED,
+    footer: { text: "is-the-mountain-out • Pipeline health" },
+    timestamp: now.toISOString(),
+  };
+  return (await postAsBot(env, embed, "pipeline-recovered notice")) !== null;
+}

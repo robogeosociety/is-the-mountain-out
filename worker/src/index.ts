@@ -18,6 +18,8 @@ import {
   notifyDiscordTest,
   notifyLabelRequest,
   notifyMountainVisibility,
+  notifyPipelineDown,
+  notifyPipelineRecovered,
 } from "./discord-mountain-notify";
 import {
   DEFAULT_OPTIONS,
@@ -26,6 +28,13 @@ import {
   type DecisionOptions,
   type NotifyState,
 } from "./transition";
+import {
+  DEFAULT_HEALTH_OPTIONS,
+  INITIAL_HEALTH_STATE,
+  decideHealth,
+  type HealthOptions,
+  type HealthState,
+} from "./health";
 
 interface Env {
   INFERENCE_CONTAINER: DurableObjectNamespace<InferenceContainer>;
@@ -45,6 +54,11 @@ interface Env {
   // LABEL_COOLDOWN_HOURS: minimum gap between label requests.
   ALERT_MIN_CONFIDENCE?: string;
   LABEL_COOLDOWN_HOURS?: string;
+  // Pipeline-health policy (see health.ts). HEALTH_ALERT_AFTER_FAILURES:
+  // consecutive failed ticks before the outage is announced.
+  // HEALTH_REALERT_HOURS: minimum gap between repeat alerts within one outage.
+  HEALTH_ALERT_AFTER_FAILURES?: string;
+  HEALTH_REALERT_HOURS?: string;
 }
 
 export class InferenceContainer extends Container<Env> {
@@ -90,6 +104,11 @@ const HISTORY_KEY = "history.jsonl";
 // awaiting confirmation). Separate from state.json so the SPA's contract stays
 // exactly the published prediction — see transition.ts for the state machine.
 const NOTIFY_STATE_KEY = "notify-state.json";
+// Pipeline-health bookkeeping (consecutive failures + what the channel has been
+// told). Separate from notify-state.json because it survives a different thing:
+// notify state is about the MOUNTAIN, this is about whether we can see it at
+// all. See health.ts.
+const HEALTH_STATE_KEY = "health-state.json";
 
 const isoUtc = (d: Date) => d.toISOString().replace(/\.\d{3}Z$/, "Z");
 
@@ -124,6 +143,26 @@ async function getNotifyState(env: Env): Promise<NotifyState> {
 
 async function putNotifyState(env: Env, state: NotifyState): Promise<void> {
   await env.STATE_BUCKET.put(NOTIFY_STATE_KEY, JSON.stringify(state, null, 2) + "\n", {
+    httpMetadata: { contentType: "application/json" },
+  });
+}
+
+async function getHealthState(env: Env): Promise<HealthState> {
+  try {
+    const obj = await env.STATE_BUCKET.get(HEALTH_STATE_KEY);
+    if (!obj) return INITIAL_HEALTH_STATE;
+    return { ...INITIAL_HEALTH_STATE, ...(JSON.parse(await obj.text()) as Partial<HealthState>) };
+  } catch (e) {
+    // Unreadable bookkeeping starts the count over rather than throwing. The
+    // cost is at most a delayed alert; throwing here would make the health
+    // check itself the thing that breaks the tick.
+    console.warn("failed to read health state; restarting the failure count:", e);
+    return INITIAL_HEALTH_STATE;
+  }
+}
+
+async function putHealthState(env: Env, state: HealthState): Promise<void> {
+  await env.STATE_BUCKET.put(HEALTH_STATE_KEY, JSON.stringify(state, null, 2) + "\n", {
     httpMetadata: { contentType: "application/json" },
   });
 }
@@ -191,16 +230,73 @@ function binaryConfidence(state: PredictionState): number {
     : (state.confidence?.not_out ?? 0);
 }
 
+/**
+ * Read a numeric [vars] override, falling back on anything unparseable.
+ *
+ * Shared by both policy readers below: an operator who fat-fingers a wrangler
+ * var gets the documented default, never a NaN threshold that silently
+ * disables a gate.
+ */
+const num = (raw: string | undefined, fallback: number) => {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
 function decisionOptions(env: Env): DecisionOptions {
-  const num = (raw: string | undefined, fallback: number) => {
-    const parsed = Number(raw);
-    return Number.isFinite(parsed) ? parsed : fallback;
-  };
   return {
     alertMinConfidence: num(env.ALERT_MIN_CONFIDENCE, DEFAULT_OPTIONS.alertMinConfidence),
     labelCooldownMs:
       num(env.LABEL_COOLDOWN_HOURS, DEFAULT_OPTIONS.labelCooldownMs / 3_600_000) * 3_600_000,
   };
+}
+
+function healthOptions(env: Env): HealthOptions {
+  return {
+    alertAfterFailures: num(
+      env.HEALTH_ALERT_AFTER_FAILURES,
+      DEFAULT_HEALTH_OPTIONS.alertAfterFailures,
+    ),
+    realertCooldownMs:
+      num(env.HEALTH_REALERT_HOURS, DEFAULT_HEALTH_OPTIONS.realertCooldownMs / 3_600_000) *
+      3_600_000,
+  };
+}
+
+/**
+ * Say out loud whether the pipeline itself is working.
+ *
+ * Called on EVERY tick, success or failure — a health check that only runs when
+ * things break can never announce that they stopped being broken.
+ *
+ * Best-effort by construction: this is observability, and observability must
+ * not be able to fail a tick that otherwise succeeded. Every path is wrapped,
+ * and a thrown error here is logged and swallowed.
+ */
+async function notifyHealth(env: Env, ok: boolean, errorMessage?: string): Promise<void> {
+  try {
+    const { kind, next, failures, since } = decideHealth(
+      await getHealthState(env),
+      ok,
+      isoUtc(new Date()),
+      healthOptions(env),
+    );
+    // Persist BEFORE posting, for the same reason notifyTransition does: a
+    // crash between the two would otherwise re-announce the outage every 15
+    // minutes, which is precisely the noise the cooldown exists to prevent.
+    await putHealthState(env, next);
+    if (kind === "quiet") return;
+    if (kind === "down") {
+      await notifyPipelineDown(env, {
+        failures,
+        since,
+        error: errorMessage ?? "(no error message recorded)",
+      });
+      return;
+    }
+    await notifyPipelineRecovered(env, { failures, since });
+  } catch (e) {
+    console.error("health notification failed:", e);
+  }
 }
 
 // One tick, one decision: announce a confirmed+confident change, ask for a
@@ -282,6 +378,15 @@ async function tick(env: Env): Promise<void> {
     console.error("inference tick failed:", e);
   }
   await appendHistory(env, record);
+  // Last, and outside the try/catch above: whatever this tick did, the channel
+  // now hears about a pipeline that has been down for an hour. Before this,
+  // the error branch ended at `appendHistory` and a `console.error` — which is
+  // how 1,637 consecutive failures went unremarked for seventeen days.
+  await notifyHealth(
+    env,
+    record.status === "ok",
+    record.status === "error" ? record.error.message : undefined,
+  );
 }
 
 export default {

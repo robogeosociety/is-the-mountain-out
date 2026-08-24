@@ -85,7 +85,7 @@ Single source of truth for webcam URL, METAR station (`KSEA`), LoRA hyperparamet
 
 ## Deployment (Cloudflare)
 
-Inference runs as the `mountain-inference` Cloudflare Worker + Container (cron `*/15`), with R2 for storage and Pages for the SPA.
+Inference runs as the `mountain-inference` Cloudflare Worker + Container (cron `*/15`), with R2 for storage. The SPA is served by **GitHub Pages** (`https://robogeosociety.github.io/is-the-mountain-out/`) — the Cloudflare Pages project the 2026-05-25 migration intended does not exist; see README → Known outage.
 
 **The Worker deploys from CI — `.github/workflows/deploy-worker.yml`.** A push to `main` touching `worker/**` (or `gh workflow run deploy-worker.yml`) runs the worker tests + typecheck, then `npx wrangler deploy`, inside the `production` GitHub environment. Deploys are serialized (`cancel-in-progress: false`): one in flight is never cancelled. To require human approval, add a required reviewer to the `production` environment — no workflow change needed.
 

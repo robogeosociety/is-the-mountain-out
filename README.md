@@ -2,11 +2,90 @@
 
 Real-time image classifier that determines whether Mount Rainier is "out" (visible) from a live UW webcam, augmented with METAR weather data. ConvNeXt Tiny backbone + LoRA fine-tuning, trained on Apple Silicon (MPS), served from Cloudflare.
 
-**Live site:** https://is-the-mountain-out.pages.dev — updated every 15 minutes.
+**Live site:** https://robogeosociety.github.io/is-the-mountain-out/
 Append `?debug` to see confidence bars and the raw METAR readout.
+
+> [!WARNING]
+> **The site is currently down, and has been since 2026-08-07.** Two independent
+> faults, neither fixable from this repo — see [Known outage](#known-outage-2026-08-07)
+> for the two things an operator has to do.
+>
+> The URL above also replaces `https://is-the-mountain-out.pages.dev`, which this
+> README advertised until 2026-08-24. That hostname does not resolve (NXDOMAIN):
+> the Cloudflare Pages project it named does not exist, and no Cloudflare Pages
+> deployment was ever recorded against this repository. GitHub Pages — which the
+> 2026-05-25 migration intended to retire — is what has actually been serving all
+> along.
 
 ![Mount Rainier Topo Map](assets/map.png)
 *Mount Rainier, the UW ATG webcam (north-northwest), and KSEA METAR station.*
+
+## Known outage (2026-08-07 →)
+
+Two independent faults. Both need a human with Cloudflare dashboard access; neither
+is a code change, which is why this section exists instead of a patch.
+
+### 1. The data plane: the webcam this project reads no longer exists
+
+At **2026-08-07T07:15Z** the `*/15` inference tick started failing and has not
+succeeded since — **1,637 consecutive failures** as of 2026-08-24, every one of
+them identical:
+
+```
+container /predict returned 500: {"detail":"HTTPError: 404 Client Error: Not Found
+for url: https://a.atmos.washington.edu/data/images/webcam2_latest.jpg"}
+```
+
+UW retired the image. `webcam2_latest.jpg` is gone from the
+`https://a.atmos.washington.edu/data/images/` directory listing, while its siblings
+(`webcam0_latest.jpg`, `webcam1_latest.jpg`, `webcam1r_latest.jpg`) still return
+`200 image/jpeg`. The camera's own page (`atmos.uw.edu/images/webcam2/`) still
+renders and still links the dead image, so this is an upstream breakage, not a
+move we can chase with a URL rewrite.
+
+Consequently `state.json` is frozen at its 2026-08-07T06:45:32Z reading and the SPA
+shows its stale state.
+
+**This is a product decision, not a config edit.** `webcam1` is alive but points
+somewhere else; the classifier was fine-tuned on webcam2's exact framing (Rainier
+just right of the Chemistry Building stack), so repointing `[webcam] url` in
+`mountain.toml` swaps the model's input distribution out from under it and almost
+certainly requires re-collection and re-training. Pick the camera first, then
+retrain — do not just edit the URL.
+
+### 2. The front end: R2 CORS still names the pre-rename GitHub org
+
+The public bucket's CORS policy allows exactly one origin, `https://tommyroar.github.io`
+— the org name **before** the rename to `robogeosociety`. The live site is served
+from `https://robogeosociety.github.io`, so every `state.json` fetch is blocked:
+
+```
+Access to fetch at 'https://pub-66d3d1f139004e29b2afcb5fba49bdb3.r2.dev/state.json'
+from origin 'https://robogeosociety.github.io' has been blocked by CORS policy:
+No 'Access-Control-Allow-Origin' header is present on the requested resource.
+```
+
+The page renders **STATE UNAVAILABLE**. This fault is independent of fault 1 — it
+would still break the site on the day the webcam comes back.
+
+**Fix:** add `https://robogeosociety.github.io` to the `AllowedOrigins` of the
+`is-the-mountain-out-public` bucket's CORS policy (R2 → the bucket → Settings →
+CORS Policy). Keeping the old origin costs nothing; adding the new one is the
+whole fix.
+
+### Also worth deciding
+
+- **The SPA build is frozen.** GitHub Pages is still enabled (`build_type: workflow`,
+  source `main`) but the workflow that built it — `.github/workflows/update.yml` —
+  was deleted in `85923e5` when the project migrated to Cloudflare Pages. It has
+  been serving the 2026-05-25 artifact ever since. Either restore a build workflow
+  or stand the Pages project back up; today the site cannot be redeployed at all.
+  Note that the served build uses `base = "/is-the-mountain-out/"` while
+  `web/vite.config.ts` now sets `base = "/"`, so a naive rebuild onto GitHub Pages
+  would 404 its own assets.
+- **Cloudflare Pages.** Restoring the project (root `web`, build
+  `npm install && npm run build`, output `web/dist`) is a live option — this README
+  no longer claims it exists either way.
 
 ## Architecture
 
@@ -23,7 +102,7 @@ flowchart LR
     container["InferenceContainer<br/>(FastAPI, sleeps 5min)"]
     r2priv[("R2: is-the-mountain-out<br/>private — captures, labels,<br/>checkpoint")]
     r2pub[("R2: is-the-mountain-out-public<br/>state.json + history.jsonl")]
-    pages["Pages SPA"]
+    ghp["GitHub Pages SPA<br/>(frozen build, 2026-05-25)"]
   end
 
   webcam(["UW ATG webcam"]) --> collector
@@ -45,8 +124,8 @@ flowchart LR
   container -- "PredictionState" --> worker
   worker -- "state.json + history.jsonl" --> r2pub
 
-  browser(["Browser"]) --> pages
-  pages -- "GET state.json (60s poll)" --> r2pub
+  browser(["Browser"]) --> ghp
+  ghp -- "GET state.json (60s poll)" --> r2pub
 ```
 
 ### Inference tick (every 15 min)
@@ -145,7 +224,7 @@ train/                model definition, scheduler, config loader, checkpoints
 tools/                labeling backend, evaluation/pruning/ab-test scripts, predict_state
 inference/            FastAPI server + Dockerfile for the Cloudflare Container
 worker/               Cloudflare Worker source (TypeScript) + wrangler.toml
-web/                  Public SPA (Vite + React), deployed by Cloudflare Pages
+web/                  Public SPA (Vite + React) — source of the GitHub Pages build
 ui/                   Internal classifier UI for bulk labeling (Vite + React)
 .github/workflows/    CI — ruff, worker tests, and the Worker deploy to Cloudflare
 scripts/              deploy-worker.sh — break-glass manual Worker redeploy
@@ -209,6 +288,14 @@ Single source of truth: `mountain.toml`.
 - `[collection]` — capture cadence
 - `[storage]` — R2 backend (`backend = "r2"`, account/bucket/cache_dir)
 
+Worker-side policy lives in `worker/wrangler.toml` `[vars]`, so thresholds move
+without a code change:
+
+- `ALERT_MIN_CONFIDENCE`, `LABEL_COOLDOWN_HOURS` — what the channel says about the
+  mountain (see `worker/src/transition.ts`)
+- `HEALTH_ALERT_AFTER_FAILURES`, `HEALTH_REALERT_HOURS` — when the channel says the
+  *pipeline* is broken (see `worker/src/health.ts`)
+
 R2 S3 credentials (`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) live in `cf.env` (gitignored). The Worker holds the same values as secrets so the container can pull its checkpoint from R2 on startup.
 
 ## What runs where
@@ -221,11 +308,11 @@ R2 S3 credentials (`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) live in `cf.env` 
 | Inference cron | Cloudflare Worker | `*/15 * * * *` |
 | Inference compute | Cloudflare Container | Worker invocation |
 | Storage | Cloudflare R2 | (always) |
-| Public SPA | Cloudflare Pages | (always) |
+| Public SPA | GitHub Pages | Frozen — its build workflow was deleted 2026-05-25 |
 | Container image | GHCR | Built by GH Actions on push to main |
 | Worker deploy | GitHub Actions | Push to main touching `worker/**`, or `gh workflow run deploy-worker.yml` |
 
-GitHub hosts the source repo, the container image registry, and now the Worker's deploy pipeline. Nothing *user-facing* depends on GitHub being available: captures and training are operator-initiated, the live site keeps serving and predicting on its own, and if Actions is down the Worker can still be shipped by hand via `scripts/deploy-worker.sh`.
+GitHub hosts the source repo, the container image registry, the Worker's deploy pipeline — and, as it turns out, the live site. The 2026-05-25 migration to Cloudflare Pages was written up as making nothing *user-facing* depend on GitHub, but that Pages project does not exist today, so the claim never held: the SPA is served by GitHub Pages. Prediction itself is independent of GitHub (the Worker's cron and the Container run on Cloudflare), and if Actions is down the Worker can still be shipped by hand via `scripts/deploy-worker.sh`.
 
 ## Network access (Mac mini)
 
