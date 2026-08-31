@@ -1,0 +1,139 @@
+name: PR Structure Gate
+
+# Hard, deterministic gate on the PR *description*. Blocks a PR whose body is
+# missing the required newspaper-template markdown spine (headline, dek, masthead,
+# clean heading levels, alt text). This is the ENFORCEABLE half of the framework —
+# it only checks objective structure, never length or style, so it does not churn.
+# The flexible length/style/diagram layer lives in pr-style-review.yml (agentic).
+#
+# Source of truth: robogeosociety/.github. Synced into owned repos by scripts/sync.sh
+# and one-click-selectable from the Actions "New workflow" UI. Fully self-contained
+# (no reusable workflow, no companion script). Full rules: PR_FRAMEWORK.md.
+#
+# Escape hatches: add the `skip-structure-gate` label to a PR to bypass, and bot
+# authors (dependabot) are skipped automatically.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, ready_for_review, synchronize]
+
+# One in-flight run per PR; a rapid series of description edits cancels the stale run.
+concurrency:
+  group: pr-structure-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  structure:
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      github.actor != 'github-actions[bot]' &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-structure-gate')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR description structure
+        env:
+          # Passed via env (never interpolated into the shell) so a hostile PR body
+          # can't inject commands. The validator reads it from os.environ.
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          cat > /tmp/validate_structure.py <<'PYEOF'
+          import os, re, sys
+
+          body = os.environ.get("PR_BODY") or ""
+          # Strip HTML comments so template scaffolding / hidden notes don't count.
+          md = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+          errors = []
+
+          if not md.strip():
+              errors.append("The PR description is empty — fill in the newspaper panel "
+                            "(see PR_FRAMEWORK.md).")
+
+          # 1) Exactly one `#` H1 headline (a short kicker line above it is allowed).
+          h1s = re.findall(r"^\s*#\s+\S.*$", md, re.M)
+          if len(h1s) == 0:
+              errors.append("Missing the `# Headline` — the panel needs one H1 outcome line.")
+          elif len(h1s) > 1:
+              errors.append(f"Found {len(h1s)} H1 headings — the panel has exactly one "
+                            "`#` headline (use `##`/`###` for sections).")
+
+          # 2) Dek / standfirst: an *italic* blockquote lede, or an explicit TL;DR.
+          #    (Bold-only blockquotes are excluded so the [!NOTE] masthead can't stand in.)
+          def has_dek(text):
+              if re.search(r"^\s*>\s*\*\*TL;DR\*\*", text, re.M | re.I):
+                  return True
+              if re.search(r"^\s*>.*\btl;dr\b", text, re.M | re.I):
+                  return True
+              for m in re.finditer(r"^\s*>\s*(?!\[!)(.+)$", text, re.M):
+                  line = m.group(1)
+                  if re.search(r"(?<!\*)\*(?!\*)[^*]+\*(?!\*)", line):   # *italic*
+                      return True
+                  if re.search(r"(?<!_)_(?!_)[^_]+_(?!_)", line):        # _italic_
+                      return True
+              return False
+          if not has_dek(md):
+              errors.append("Missing the `> _dek_` standfirst — add the italic blockquote "
+                            "lede (or a `> **TL;DR**`) directly under the headline.")
+
+          # 3) Masthead strip: a GitHub alert callout.
+          if not re.search(r"^\s*>\s*\[!(NOTE|TIP|IMPORTANT)\]", md, re.M):
+              errors.append("Missing the `> [!NOTE]` masthead strip "
+                            "(area · type · risk · closes #N).")
+
+          # 4) No heading-level skips (don't jump `#` -> `###`).
+          prev = 0
+          for m in re.finditer(r"^(#{1,6})\s+(.+)$", md, re.M):
+              level = len(m.group(1))
+              if prev and level > prev + 1:
+                  title = m.group(2).strip()[:40]
+                  errors.append(f"Heading skip: jumped to H{level} ('{title}') after H{prev}.")
+              prev = level
+
+          # 5) Every image carries alt text (markdown and <img>).
+          for m in re.finditer(r"!\[(.*?)\]\(", md):
+              if not m.group(1).strip():
+                  errors.append("Markdown image without alt text — every image needs a "
+                                "descriptive `![alt](…)`.")
+                  break
+          for m in re.finditer(r"<img\b([^>]*)>", md, re.I):
+              alt = re.search(r'alt\s*=\s*"([^"]*)"', m.group(1), re.I)
+              if not (alt and alt.group(1).strip()):
+                  errors.append('`<img>` without alt text — add `alt="…"`.')
+                  break
+
+          # 6) Reject an unfilled template (placeholder tokens left behind).
+          placeholders = re.findall(
+              r"<AREA>|<RUBRIC>|<Evocative but accurate headline|<Dek:|<area>|"
+              r"<Narrative lede|<Punchy subhead|<Pull quote|<describe the screen>|"
+              r"closes #000|closes #N\b",
+              body)
+          if placeholders:
+              sample = ", ".join(sorted(set(placeholders))[:3])
+              errors.append(f"Template placeholders left unfilled (e.g. {sample}). "
+                            "Fill or delete every scaffold token.")
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if errors:
+              print("PR description structure gate: FAIL\n")
+              for e in errors:
+                  print(f"::error title=PR structure gate::{e}")
+                  print(f"  ✗ {e}")
+              if summary_path:
+                  with open(summary_path, "a", encoding="utf-8") as f:
+                      f.write("## ❌ PR structure gate failed\n\n")
+                      f.write("The PR description is missing required newspaper-template "
+                              "structure:\n\n")
+                      for e in errors:
+                          f.write(f"- {e}\n")
+                      f.write("\nFix the description (edit it in place), then the gate "
+                              "re-runs automatically. Full rules: `PR_FRAMEWORK.md`. "
+                              "Add the `skip-structure-gate` label to bypass.\n")
+              sys.exit(1)
+
+          print("PR description structure gate: PASS")
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as f:
+                  f.write("## ✅ PR structure gate passed\n\n"
+                          "The description carries the required newspaper spine "
+                          "(headline, dek, masthead, clean heading levels, alt text).\n")
+          PYEOF
+          python3 /tmp/validate_structure.py

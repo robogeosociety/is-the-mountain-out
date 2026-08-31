@@ -1,0 +1,86 @@
+name: PR Code Review
+
+# The correctness half of keeping the agents honest. pr-style-review judges the
+# DESCRIPTION; this reviews the DIFF — bugs, edge cases, security, missing tests.
+# One advisory comment per readiness event; it never blocks a merge by itself.
+#
+# The one tooth it has: on a defect that would break main or corrupt data, it may
+# apply the `blocked` label, which holds the automerge lane until a human removes
+# it. That is deliberate — an agent-written PR reviewed only by the agent that
+# wrote it is a rubber stamp, and the automerge lane is exactly where a wrong
+# merge costs the most. The label is the whole intervention: reversible with one
+# click, visible in the queue (awaiting-your-action assigns it to Tommy), and it
+# must always come with the comment saying precisely why.
+#
+# Runs on opened/ready_for_review, NOT on every push — a review per push churns.
+# Re-request after changes by mentioning @claude on the PR (canonical responder).
+#
+# Auth: CLAUDE_CODE_OAUTH_TOKEN (set in every owned repo by scripts/sync.sh).
+# Source of truth: robogeosociety/.github. One-click-selectable from the Actions UI.
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+
+concurrency:
+  group: pr-code-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  code-review:
+    # Drafts aren't ready; bots (dependabot bumps) don't need judgment; opt out
+    # per-PR with the `skip-code-review` label.
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.actor != 'dependabot[bot]' &&
+      github.actor != 'github-actions[bot]' &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-code-review')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # the review comment + the `blocked` label
+      issues: write          # labels ride the issues API
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Claude code review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are the CODE reviewer for pull request
+            #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+
+            A separate workflow already reviews the PR description; do not comment
+            on prose, style, or formatting of the description. Your subject is the
+            DIFF and only the diff (`gh pr diff`, plus reading surrounding files
+            for context).
+
+            Review for, in order of importance:
+            1. CORRECTNESS. Bugs, broken edge cases, race conditions, error paths
+               that swallow or misreport failures. Verify each claim against the
+               actual code — read the surrounding file before asserting a function
+               misbehaves.
+            2. SECURITY. Injected input reaching a shell/API, secrets in code or
+               logs, permissions widened beyond what the change needs.
+            3. TESTS. Behavior this diff changes that no test pins down — name the
+               missing case concretely, don't just say "add tests".
+            4. BLAST RADIUS. Callers or workflows elsewhere that this change breaks.
+
+            Post exactly ONE concise comment, findings ordered most-severe first,
+            each anchored to a file/line. If the diff is sound, post a short
+            "LGTM — reviewed for correctness, nothing blocking" instead of
+            manufacturing nitpicks. Do not push commits or edit files.
+
+            THE ONE ESCALATION: if — and only if — you find a defect that would
+            break the default branch, lose or corrupt data, or leak a secret,
+            add the `blocked` label to this PR (it holds the automerge lane and
+            queues the PR for a human) and open your comment by stating exactly
+            which finding justified it. A style preference, a missing test, or an
+            uncertain hunch is never worth the label; when unsure, say so in the
+            comment and leave the label alone.
+          claude_args: |
+            --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr edit:*),Bash(gh issue view:*),Read,Grep,Glob,mcp__github__pull_request_read,mcp__github__issue_read,mcp__github__add_issue_comment"

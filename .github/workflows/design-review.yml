@@ -1,0 +1,85 @@
+name: Design Review
+
+# Design review baked into the process: label an ISSUE `proposal` and Claude
+# posts one structured review before any code exists — problem framing,
+# alternatives, blast radius, where it sits against the org's current
+# priorities, and the explicit questions only Tommy can answer.
+#
+# `proposal` already means something on PRs (the dev-wiki draft preview lane);
+# this workflow extends the same word to issues, where a proposal starts life.
+# The `issues: labeled` trigger fires for issues only, so the two meanings never
+# collide. Re-review after a rewrite by removing and re-adding the label.
+#
+# When the review ends in questions that need a decision, it applies
+# `human-task` — so awaiting-your-action assigns the issue and GitHub's own
+# notifications fire. The review prompts; it never decides.
+#
+# Auth: CLAUDE_CODE_OAUTH_TOKEN (set in every owned repo by scripts/sync.sh).
+# Source of truth: robogeosociety/.github. One-click-selectable from the Actions UI.
+
+on:
+  issues:
+    types: [labeled]
+
+concurrency:
+  group: design-review-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  design-review:
+    if: >-
+      github.event.label.name == 'proposal' &&
+      !contains(github.event.issue.labels.*.name, 'skip-design-review')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write          # the review comment + the human-task label
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Claude design review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are the DESIGN reviewer for issue
+            #${{ github.event.issue.number }} in ${{ github.repository }},
+            which has just been labeled `proposal`.
+
+            Read the issue body and its comments, then enough of this repository
+            to judge the proposal against what actually exists. For org context,
+            read the WIP/staleness policy at `standard/project-policy.yml` in
+            this repo if present, otherwise fetch
+            https://raw.githubusercontent.com/robogeosociety/.github/main/standard/project-policy.yml
+            — it names every board and its limits, which is the org's statement
+            of what it is trying to have in flight.
+
+            Post exactly ONE review comment structured as:
+
+            1. THE PROBLEM, RESTATED. One paragraph in your own words. If the
+               issue describes a solution without a problem, say so — that is the
+               most common failure and the review's first job is to catch it.
+            2. THE PROPOSAL'S BET. What it assumes must be true to be worth doing.
+            3. ALTERNATIVES. Two real ones, including "do nothing" with what that
+               costs, and the cheapest thing that tests the same bet.
+            4. BLAST RADIUS. What existing code, workflows, boards, or conventions
+               this touches; what breaks if it's wrong; how it would be undone.
+            5. SEQUENCING. Where this sits against current in-flight work — does
+               it displace something on an already-full board, or unblock it?
+            6. RECOMMENDATION. Proceed / reshape / park, with the one sentence of
+               reasoning that matters most.
+            7. QUESTIONS FOR TOMMY. The decisions only the operator can make,
+               each phrased so it can be answered in one line, each with your
+               suggested default. No more than three — if you have ten questions,
+               the real finding is that the proposal is underspecified; say that
+               instead.
+
+            If section 7 is non-empty, add the `human-task` label to this issue
+            so it enters the waiting-on-you queue. Be direct: a design review
+            that hedges everything reviews nothing. Do not push commits or edit
+            files; the comment and the one label are your whole output.
+          claude_args: |
+            --allowedTools "Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh issue edit:*),Bash(gh search issues:*),Read,Grep,Glob,WebFetch,mcp__github__issue_read,mcp__github__list_issues,mcp__github__search_issues,mcp__github__add_issue_comment"
