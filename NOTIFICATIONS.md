@@ -14,11 +14,14 @@ label this project can collect — precision over recall is the stated priority.
 ## What fires
 
 The channel does two different jobs, and confidence decides which one a tick gets.
+A third job — saying so when the pipeline itself is broken — was added 2026-08-24.
 
 | Kind | Trigger | Title | Color |
 |---|---|---|---|
 | **Alert** | confirmed change, confidence ≥ `ALERT_MIN_CONFIDENCE` | 🏔️ The mountain is out! / ☁️ The mountain is gone | green / gray |
 | **Label request** | any tick below that threshold, at most once per `LABEL_COOLDOWN_HOURS` | 🤔 Is the mountain out? | amber |
+| **Pipeline down** | `HEALTH_ALERT_AFTER_FAILURES` consecutive failed ticks, then at most once per `HEALTH_REALERT_HOURS` | 🚨 Inference pipeline is down | red |
+| **Pipeline recovered** | first success after a `down` alert — never rate-limited | ✅ Inference pipeline recovered | green |
 
 An **alert** must be trustworthy — you act on it. A **label request** must be
 informative — you correct it, and the correction is a training row. Those want
@@ -58,6 +61,40 @@ different picture later, and you must be labeling the frame you can see. The
 footer is the frame's R2 capture key, which is the contract `bot/labeler.py`
 parses. If the frame fails to persist, the post falls back to a prose footer and
 is simply not labelable.
+
+## Pipeline health (`worker/src/health.ts`)
+
+The first two rows above describe the mountain. These two describe whether we can
+see it at all.
+
+Between **2026-08-07T07:15Z** and 2026-08-24 the `*/15` tick failed **1,637 times
+in a row** — the UW webcam image 404'd upstream — and the channel said nothing.
+The tick's error path appended the failure to `history.jsonl` and called
+`console.error`, and that was all it did: a log nobody reads and an ndjson file
+nobody opens. The only visible symptom was a site quietly showing a stale reading,
+which is indistinguishable from a slow day on the mountain.
+
+So a sustained outage is now an event, not an absence of events. Two gates, the
+same shape as the alert/label gates:
+
+- **Threshold.** Nothing is said until `HEALTH_ALERT_AFTER_FAILURES` ticks have
+  failed consecutively (default 4 = one hour). `history.jsonl` holds 142 "container
+  is not listening" and 37 NOAA read timeouts that all self-healed on the next
+  tick; paging on those teaches you to ignore the channel, which is how a
+  seventeen-day outage goes unnoticed.
+- **Cooldown.** Within one outage, re-alert at most every `HEALTH_REALERT_HOURS`
+  (default 6) — about four messages a day rather than ninety-six.
+
+**Recovery is deliberately not rate-limited.** The first success after an alerted
+outage posts immediately. An all-clear is cheap, and a channel still showing a
+pipeline that has actually been healthy for hours is its own kind of wrong.
+
+The down alert carries the last error verbatim. The seventeen-day outage was
+diagnosable from a single line of it; nobody ever saw that line.
+
+Health bookkeeping lives in `health-state.json` in the public bucket, next to
+`notify-state.json`. It is written before the message is posted, so a crash
+between the two costs one alert rather than unlocking a burst of them.
 
 ## Why a bot token and not a webhook
 

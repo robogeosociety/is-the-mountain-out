@@ -85,7 +85,9 @@ Single source of truth for webcam URL, METAR station (`KSEA`), LoRA hyperparamet
 
 ## Deployment (Cloudflare)
 
-Inference runs as the `mountain-inference` Cloudflare Worker + Container (cron `*/15`), with R2 for storage and Pages for the SPA.
+Inference runs as the `mountain-inference` Cloudflare Worker + Container (cron `*/15`), with R2 for storage. The public site is a second Worker, **`is-the-mountain-out`** (`web/wrangler.toml`, `https://is-the-mountain-out.tommy-b-doerr.workers.dev`), that serves the Vite build as static assets and answers `/state.json` + `/history.jsonl` same-origin from the R2 binding (`web/worker/index.ts`) — so the SPA has no cross-origin fetch and the bucket's CORS allowlist is out of the request path. That allowlist naming the pre-rename org is what blanked the site for weeks; see README → Outage post-mortem. There is no Cloudflare Pages project (the 2026-05-25 migration described one that was never created); the old GitHub Pages URL still serves a frozen 2026-05-25 build as a fallback.
+
+**The site deploys from CI too — `.github/workflows/deploy-web.yml`**, on a push to `main` touching `web/**` (or `gh workflow run deploy-web.yml`): `web-ci.yml` (lint + `tsc -b` + vite build, the PR gate) then `npx wrangler deploy` in the `production-web` environment. By hand: `cd web && npm run deploy`. `vite dev` proxies `/state.json` to the bucket's r2.dev URL so the SPA code is identical in both.
 
 **The Worker deploys from CI — `.github/workflows/deploy-worker.yml`.** A push to `main` touching `worker/**` (or `gh workflow run deploy-worker.yml`) runs the worker tests + typecheck, then `npx wrangler deploy`, inside the `production` GitHub environment. Deploys are serialized (`cancel-in-progress: false`): one in flight is never cancelled. To require human approval, add a required reviewer to the `production` environment — no workflow change needed.
 
@@ -109,7 +111,7 @@ Required permissions — **two**, both **Account**-scoped and restricted to that
 
 | Permission | Why |
 | --- | --- |
-| `Workers Scripts: Edit` | Script upload, and with it the DO + R2 bindings, the `new_sqlite_classes` migration, and the `[triggers] crons` schedule. Non-negotiable. |
+| `Workers Scripts: Edit` | Script upload, and with it the DO + R2 bindings, the `new_sqlite_classes` migration, and the `[triggers] crons` schedule. Non-negotiable. Also everything `deploy-web.yml` needs: the static-assets upload rides on the same permission. |
 | `Containers: Edit` | `wrangler.toml` has a `[[containers]]` block, so every deploy also PATCHes the container application (`/accounts/{id}/containers/applications`) with the image ref, `max_instances`, `instance_type`. Without it the script uploads and the container step 403s. |
 
 Deliberately **not** granted, each for a reason:

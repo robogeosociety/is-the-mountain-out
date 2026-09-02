@@ -19,6 +19,19 @@ ALERT_MIN_CONFIDENCE = "0.85"
 # rather than every 15 minutes. 4h ≈ 4 asks/day on that same sample.
 LABEL_COOLDOWN_HOURS = "4"
 
+# Pipeline-health alerting — see worker/src/health.ts. The */15 tick failed
+# 1,637 times in a row between 2026-08-07 and 2026-08-24 (the UW webcam2 image
+# 404'd upstream) and said nothing, because the error path only wrote to
+# history.jsonl. These two govern the alert that now exists.
+#
+# Consecutive failed ticks before the outage is announced. 4 = one hour at the
+# */15 cadence: past every transient in the history file (container cold start,
+# NOAA read timeout, Durable Object reset), well short of a fortnight.
+HEALTH_ALERT_AFTER_FAILURES = "4"
+# Minimum gap between repeat alerts within one outage, so a long outage nags
+# ~4x/day rather than 96x. Recovery is never rate-limited.
+HEALTH_REALERT_HOURS = "6"
+
 # Container binding. Cloudflare Containers can only pull from its own managed
 # registry (not GHCR), so the image is pushed to registry.cloudflare.com:
 #   docker pull ghcr.io/robogeosociety/is-the-mountain-out/inference:latest
