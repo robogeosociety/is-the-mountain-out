@@ -2,90 +2,62 @@
 
 Real-time image classifier that determines whether Mount Rainier is "out" (visible) from a live UW webcam, augmented with METAR weather data. ConvNeXt Tiny backbone + LoRA fine-tuning, trained on Apple Silicon (MPS), served from Cloudflare.
 
-**Live site:** https://robogeosociety.github.io/is-the-mountain-out/
+**Live site:** https://is-the-mountain-out.tommy-b-doerr.workers.dev
 Append `?debug` to see confidence bars and the raw METAR readout.
 
-> [!WARNING]
-> **The site is currently down, and has been since 2026-08-07.** Two independent
-> faults, neither fixable from this repo — see [Known outage](#known-outage-2026-08-07)
-> for the two things an operator has to do.
->
-> The URL above also replaces `https://is-the-mountain-out.pages.dev`, which this
-> README advertised until 2026-08-24. That hostname does not resolve (NXDOMAIN):
-> the Cloudflare Pages project it named does not exist, and no Cloudflare Pages
-> deployment was ever recorded against this repository. GitHub Pages — which the
-> 2026-05-25 migration intended to retire — is what has actually been serving all
-> along.
+> [!NOTE]
+> The site was down from 2026-08-07 to 2026-09-02 — three independent faults,
+> written up below in [Outage post-mortem](#outage-post-mortem-2026-08-07--2026-09-02).
+> All three are resolved. The old GitHub Pages URL,
+> `https://robogeosociety.github.io/is-the-mountain-out/`, still serves the
+> 2026-05-25 build and works again as a fallback, but it is no longer the site.
 
 ![Mount Rainier Topo Map](assets/map.png)
 *Mount Rainier, the UW ATG webcam (north-northwest), and KSEA METAR station.*
 
-## Known outage (2026-08-07 →)
+## Outage post-mortem (2026-08-07 → 2026-09-02)
 
-Two independent faults. Both need a human with Cloudflare dashboard access; neither
-is a code change, which is why this section exists instead of a patch.
+The README advertised `https://is-the-mountain-out.pages.dev` until 2026-08-24. That
+hostname never resolved: the Cloudflare Pages project the 2026-05-25 migration
+described was never created, and GitHub Pages — which that migration meant to
+retire — kept serving a frozen build. Chasing the dead URL found three faults.
 
-### 1. The data plane: the webcam this project reads no longer exists
+### 1. The data plane: UW's webcam2 image went away, then came back
 
-At **2026-08-07T07:15Z** the `*/15` inference tick started failing and has not
-succeeded since — **1,637 consecutive failures** as of 2026-08-24, every one of
-them identical:
+At **2026-08-07T07:00Z** `webcam2_latest.jpg` started returning 404 upstream, and
+every `*/15` inference tick failed the same way until **2026-08-27T21:15Z** —
+**1,970 consecutive failures, 20.6 days** — when UW restored the image. Nothing
+changed on this side; `state.json` simply started moving again.
 
-```
-container /predict returned 500: {"detail":"HTTPError: 404 Client Error: Not Found
-for url: https://a.atmos.washington.edu/data/images/webcam2_latest.jpg"}
-```
+The tick's error path appended to `history.jsonl` and called `console.error`,
+which is why nobody noticed. `worker/src/health.ts` now announces an outage in
+Discord after `HEALTH_ALERT_AFTER_FAILURES` consecutive failed ticks and posts an
+all-clear on recovery (see `NOTIFICATIONS.md`). The camera is still `webcam2`; the
+classifier was fine-tuned on its exact framing, so if UW retires it for good the
+fix is a retrain against a sibling camera, not a URL edit.
 
-UW retired the image. `webcam2_latest.jpg` is gone from the
-`https://a.atmos.washington.edu/data/images/` directory listing, while its siblings
-(`webcam0_latest.jpg`, `webcam1_latest.jpg`, `webcam1r_latest.jpg`) still return
-`200 image/jpeg`. The camera's own page (`atmos.uw.edu/images/webcam2/`) still
-renders and still links the dead image, so this is an upstream breakage, not a
-move we can chase with a URL rewrite.
+### 2. The front end: R2 CORS still named the pre-rename GitHub org
 
-Consequently `state.json` is frozen at its 2026-08-07T06:45:32Z reading and the SPA
-shows its stale state.
+The public bucket's CORS policy allowed exactly one origin,
+`https://tommyroar.github.io` — the org name *before* the rename to
+`robogeosociety`. Every `state.json` fetch from the live origin was blocked and the
+page rendered **STATE UNAVAILABLE**, independently of fault 1.
 
-**This is a product decision, not a config edit.** `webcam1` is alive but points
-somewhere else; the classifier was fine-tuned on webcam2's exact framing (Rainier
-just right of the Chemistry Building stack), so repointing `[webcam] url` in
-`mountain.toml` swaps the model's input distribution out from under it and almost
-certainly requires re-collection and re-training. Pick the camera first, then
-retrain — do not just edit the URL.
+Fixed 2026-09-02 two ways. `https://robogeosociety.github.io` was added to the
+bucket's `AllowedOrigins` (via `wrangler r2 bucket cors set`), so the GitHub Pages
+build works again. And the new site does not use CORS at all: the
+`is-the-mountain-out` Worker serves `/state.json` same-origin from the R2 binding
+(`web/worker/index.ts`), so a future hostname change cannot break it this way.
 
-### 2. The front end: R2 CORS still names the pre-rename GitHub org
+### 3. The build: the SPA could not be redeployed
 
-The public bucket's CORS policy allows exactly one origin, `https://tommyroar.github.io`
-— the org name **before** the rename to `robogeosociety`. The live site is served
-from `https://robogeosociety.github.io`, so every `state.json` fetch is blocked:
+GitHub Pages was still enabled, but the workflow that built it was deleted in
+`85923e5` for a Cloudflare Pages project that never existed. The served build was
+the 2026-05-25 artifact, with `base = "/is-the-mountain-out/"` baked in.
 
-```
-Access to fetch at 'https://pub-66d3d1f139004e29b2afcb5fba49bdb3.r2.dev/state.json'
-from origin 'https://robogeosociety.github.io' has been blocked by CORS policy:
-No 'Access-Control-Allow-Origin' header is present on the requested resource.
-```
-
-The page renders **STATE UNAVAILABLE**. This fault is independent of fault 1 — it
-would still break the site on the day the webcam comes back.
-
-**Fix:** add `https://robogeosociety.github.io` to the `AllowedOrigins` of the
-`is-the-mountain-out-public` bucket's CORS policy (R2 → the bucket → Settings →
-CORS Policy). Keeping the old origin costs nothing; adding the new one is the
-whole fix.
-
-### Also worth deciding
-
-- **The SPA build is frozen.** GitHub Pages is still enabled (`build_type: workflow`,
-  source `main`) but the workflow that built it — `.github/workflows/update.yml` —
-  was deleted in `85923e5` when the project migrated to Cloudflare Pages. It has
-  been serving the 2026-05-25 artifact ever since. Either restore a build workflow
-  or stand the Pages project back up; today the site cannot be redeployed at all.
-  Note that the served build uses `base = "/is-the-mountain-out/"` while
-  `web/vite.config.ts` now sets `base = "/"`, so a naive rebuild onto GitHub Pages
-  would 404 its own assets.
-- **Cloudflare Pages.** Restoring the project (root `web`, build
-  `npm install && npm run build`, output `web/dist`) is a live option — this README
-  no longer claims it exists either way.
+Fixed by hosting the SPA as a Cloudflare Worker with static assets
+(`web/wrangler.toml`) and deploying it from CI (`.github/workflows/deploy-web.yml`)
+on every push to `main` touching `web/**`. See [Deploying](#deploying).
 
 ## Architecture
 
@@ -102,7 +74,7 @@ flowchart LR
     container["InferenceContainer<br/>(FastAPI, sleeps 5min)"]
     r2priv[("R2: is-the-mountain-out<br/>private — captures, labels,<br/>checkpoint")]
     r2pub[("R2: is-the-mountain-out-public<br/>state.json + history.jsonl")]
-    ghp["GitHub Pages SPA<br/>(frozen build, 2026-05-25)"]
+    site["is-the-mountain-out Worker<br/>(SPA static assets + /state.json)"]
   end
 
   webcam(["UW ATG webcam"]) --> collector
@@ -124,8 +96,8 @@ flowchart LR
   container -- "PredictionState" --> worker
   worker -- "state.json + history.jsonl" --> r2pub
 
-  browser(["Browser"]) --> ghp
-  ghp -- "GET state.json (60s poll)" --> r2pub
+  browser(["Browser"]) -- "GET / and /state.json (60s poll)" --> site
+  site -- "get(state.json) via R2 binding" --> r2pub
 ```
 
 ### Inference tick (every 15 min)
@@ -224,9 +196,9 @@ train/                model definition, scheduler, config loader, checkpoints
 tools/                labeling backend, evaluation/pruning/ab-test scripts, predict_state
 inference/            FastAPI server + Dockerfile for the Cloudflare Container
 worker/               Cloudflare Worker source (TypeScript) + wrangler.toml
-web/                  Public SPA (Vite + React) — source of the GitHub Pages build
+web/                  Public SPA (Vite + React) + the Worker that serves it (worker/, wrangler.toml)
 ui/                   Internal classifier UI for bulk labeling (Vite + React)
-.github/workflows/    CI — ruff, worker tests, and the Worker deploy to Cloudflare
+.github/workflows/    CI — ruff, pytest, worker + web checks, and both Cloudflare deploys
 scripts/              deploy-worker.sh — break-glass manual Worker redeploy
 ```
 
@@ -257,27 +229,39 @@ uv run python tools/predict_state.py --config mountain.toml
 
 # Cloudflare Worker tests (also run on every PR by .github/workflows/worker-ci.yml)
 cd worker && npm ci && npm test && npm run typecheck
+
+# Public SPA: dev server (proxies /state.json to R2), lint + typecheck + build (web-ci.yml)
+cd web && npm ci && npm run dev
+cd web && npm run lint && npm run build
 ```
 
-## Deploying the Worker
+## Deploying
 
-**The Worker deploys from CI.** Pushing to `main` with changes under `worker/**`
-runs `.github/workflows/deploy-worker.yml`: worker tests + typecheck, then
-`wrangler deploy` into the `production` GitHub environment, recording a GitHub
-Deployment so the [Environments page](https://github.com/robogeosociety/is-the-mountain-out/deployments)
-shows what is actually live. Redeploy the current `main` by hand with:
+Two Workers, both deployed from CI on a push to `main`, each inside its own GitHub
+environment so the [Environments page](https://github.com/robogeosociety/is-the-mountain-out/deployments)
+records what is actually live:
+
+| Worker | Source | Workflow | Trigger paths | Environment |
+|---|---|---|---|---|
+| `mountain-inference` (cron + container) | `worker/` | `deploy-worker.yml` | `worker/**` | `production` |
+| `is-the-mountain-out` (the site) | `web/` | `deploy-web.yml` | `web/**` | `production-web` |
+
+Each workflow first runs the same checks that gate PRs (`worker-ci.yml` /
+`web-ci.yml`), then `wrangler deploy`. Redeploy the current `main` by hand with:
 
 ```bash
-gh workflow run deploy-worker.yml
+gh workflow run deploy-worker.yml   # inference Worker
+gh workflow run deploy-web.yml      # the site
 ```
 
 CI authenticates with the repo secret `CLOUDFLARE_API_TOKEN` (see `CLAUDE.md` →
 Deployment (Cloudflare) for the required token scope). Without it the deploy job
 fails at its preflight step with an explicit message and deploys nothing.
 
-`scripts/deploy-worker.sh` is the **break-glass** path — for when Actions is
-down, the token is expired, or an uncommitted tree must ship. It uses your own
-`wrangler login` session and warns before it runs.
+`scripts/deploy-worker.sh` is the **break-glass** path for the inference Worker —
+for when Actions is down, the token is expired, or an uncommitted tree must ship.
+It uses your own `wrangler login` session and warns before it runs. The site's
+equivalent is simply `cd web && npm run deploy`.
 
 ## Configuration
 
@@ -308,11 +292,17 @@ R2 S3 credentials (`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) live in `cf.env` 
 | Inference cron | Cloudflare Worker | `*/15 * * * *` |
 | Inference compute | Cloudflare Container | Worker invocation |
 | Storage | Cloudflare R2 | (always) |
-| Public SPA | GitHub Pages | Frozen — its build workflow was deleted 2026-05-25 |
+| Public SPA | Cloudflare Worker `is-the-mountain-out` (static assets) | Push to main touching `web/**`, or `gh workflow run deploy-web.yml` |
 | Container image | GHCR | Built by GH Actions on push to main |
 | Worker deploy | GitHub Actions | Push to main touching `worker/**`, or `gh workflow run deploy-worker.yml` |
 
-GitHub hosts the source repo, the container image registry, the Worker's deploy pipeline — and, as it turns out, the live site. The 2026-05-25 migration to Cloudflare Pages was written up as making nothing *user-facing* depend on GitHub, but that Pages project does not exist today, so the claim never held: the SPA is served by GitHub Pages. Prediction itself is independent of GitHub (the Worker's cron and the Container run on Cloudflare), and if Actions is down the Worker can still be shipped by hand via `scripts/deploy-worker.sh`.
+GitHub hosts the source repo, the container image registry, and both deploy
+pipelines; nothing user-facing runs there. The site and prediction both run on
+Cloudflare, and if Actions is down either Worker can still be shipped by hand
+(`scripts/deploy-worker.sh`, `cd web && npm run deploy`). The 2026-05-25 migration
+claimed this and did not deliver it — the Cloudflare Pages project it described was
+never created and GitHub Pages served a frozen build until 2026-09-02; see the
+post-mortem above.
 
 ## Network access (Mac mini)
 

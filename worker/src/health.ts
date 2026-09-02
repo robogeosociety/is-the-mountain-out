@@ -3,13 +3,14 @@
 //
 // WHY THIS EXISTS
 //
-// On 2026-08-07 at 07:15Z the UW ATG webcam2 image (webcam2_latest.jpg) stopped
-// existing upstream. Every */15 tick since has failed the same way:
+// On 2026-08-07 at 07:00Z the UW ATG webcam2 image (webcam2_latest.jpg) stopped
+// existing upstream. Every */15 tick for the next 20.6 days failed the same way:
 //
 //   container /predict returned 500: {"detail":"HTTPError: 404 Client Error:
 //   Not Found for url: https://a.atmos.washington.edu/data/images/webcam2_latest.jpg"}
 //
-// 1,637 consecutive failures. Seventeen days. NOTHING WAS SAID. The tick's
+// 1,970 consecutive failures before UW restored the image on 2026-08-27 —
+// three weeks in which NOTHING WAS SAID. The tick's
 // catch block appended the error to history.jsonl and called console.error,
 // and that was the whole of it — a log nobody reads and an ndjson file nobody
 // opens. The published state.json simply stopped moving, and the only symptom a

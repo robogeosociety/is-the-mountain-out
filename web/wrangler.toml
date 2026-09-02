@@ -1,0 +1,36 @@
+# The public site: a Worker that serves the built SPA as static assets and
+# answers /state.json and /history.jsonl straight out of the public R2 bucket.
+#
+# Why a Worker and not Cloudflare Pages: the 2026-05-25 migration wrote up a
+# Pages project that was never created, and the site sat on a frozen GitHub
+# Pages build for three months. Workers with static assets is what Cloudflare
+# now recommends over Pages, it deploys through the same wrangler + CI path as
+# the inference Worker (worker/), and — the part that matters for this SPA —
+# the state file is served same-origin through the R2 binding, so the page no
+# longer depends on the bucket's CORS allowlist naming whichever hostname the
+# site happens to live on. That allowlist is what broke the site after the
+# org rename.
+#
+# Deploys from CI: .github/workflows/deploy-web.yml on a push to main touching
+# web/**. By hand: `cd web && npm run build && npx wrangler deploy`.
+name = "is-the-mountain-out"
+main = "worker/index.ts"
+compatibility_date = "2025-04-01"
+
+[observability]
+enabled = true
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+# Unknown paths fall back to index.html (client-side routing, /?debug etc.).
+not_found_handling = "single-page-application"
+# Only the state endpoints go through the Worker; everything else is served
+# directly from the asset store without invoking it.
+run_worker_first = ["/state.json", "/history.jsonl"]
+
+# Same bucket the inference Worker (worker/wrangler.toml) writes to. Read-only
+# here by convention — this Worker only ever calls get().
+[[r2_buckets]]
+binding = "STATE_BUCKET"
+bucket_name = "is-the-mountain-out-public"

@@ -60,12 +60,15 @@ const PRESENTATION: Record<ClassName | 'unknown', Presentation> = {
 }
 
 const STALE_MS = 60 * 60 * 1000
+// Same-origin: the Worker in ../worker/index.ts serves it from R2, and
+// `vite dev` proxies it (vite.config.ts). No cross-origin fetch, no CORS.
+const STATE_URL = '/state.json'
 
-function formatRelative(iso: string | null): string {
+function formatRelative(iso: string | null, now: number): string {
   if (!iso) return 'never'
   const then = Date.parse(iso)
   if (Number.isNaN(then)) return 'unknown'
-  const diffSec = Math.round((Date.now() - then) / 1000)
+  const diffSec = Math.round((now - then) / 1000)
   if (diffSec < 30) return 'just now'
   if (diffSec < 90) return '1 minute ago'
   if (diffSec < 3600) return `${Math.round(diffSec / 60)} minutes ago`
@@ -76,13 +79,18 @@ function formatRelative(iso: string | null): string {
 function App() {
   const [state, setState] = useState<State | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Wall clock as of the last poll. Read once per poll rather than during
+  // render so staleness is a stable input, not a fresh Date.now() every paint.
+  const [now, setNow] = useState(() => Date.now())
   const debug = new URLSearchParams(window.location.search).has('debug')
 
   useEffect(() => {
     let cancelled = false
     const load = async () => {
+      const polledAt = Date.now()
+      if (!cancelled) setNow(polledAt)
       try {
-        const resp = await fetch(`${import.meta.env.VITE_STATE_URL}?t=${Date.now()}`)
+        const resp = await fetch(`${STATE_URL}?t=${polledAt}`)
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
         const json = (await resp.json()) as State
         if (!cancelled) {
@@ -103,7 +111,7 @@ function App() {
 
   const className = state?.class_name ?? null
   const timestamp = state?.timestamp_utc ?? null
-  const stale = timestamp ? Date.now() - Date.parse(timestamp) > STALE_MS : false
+  const stale = timestamp ? now - Date.parse(timestamp) > STALE_MS : false
   const key: ClassName | 'unknown' = className && !stale ? className : 'unknown'
   const look = PRESENTATION[key]
 
@@ -119,9 +127,9 @@ function App() {
         <p className="mt-4 text-2xl sm:text-3xl font-medium opacity-90">{look.sub}</p>
         <p className={`mt-10 text-sm uppercase tracking-widest ${look.accent}`}>
           {stale && timestamp
-            ? `stale — last checked ${formatRelative(timestamp)}`
+            ? `stale — last checked ${formatRelative(timestamp, now)}`
             : timestamp
-            ? `checked ${formatRelative(timestamp)}`
+            ? `checked ${formatRelative(timestamp, now)}`
             : error
             ? 'state unavailable'
             : 'loading…'}

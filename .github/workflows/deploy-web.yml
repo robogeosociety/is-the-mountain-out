@@ -1,0 +1,79 @@
+# Deploy the public site — the `is-the-mountain-out` Worker (SPA as static
+# assets + /state.json from R2) — from CI. See web/wrangler.toml for why the
+# site is a Worker rather than the Cloudflare Pages project the README once
+# advertised and the GitHub Pages build it actually ran on until 2026-09.
+#
+# Same shape as deploy-worker.yml: gate on the PR checks, `wrangler deploy`
+# inside a GitHub environment so the Deployment record (in_progress →
+# success/failure, with the live URL) comes free. Separate environment from
+# the inference Worker's `production` so the Environments page shows the two
+# things that can be live independently.
+#
+# Auth: the same repo secret `CLOUDFLARE_API_TOKEN`. Uploading a Worker with
+# static assets needs only `Workers Scripts: Edit`, which it already has.
+name: Deploy Web
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - '.github/workflows/deploy-web.yml'
+      - '.github/workflows/web-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-web-production
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: ./.github/workflows/web-ci.yml
+
+  deploy:
+    name: wrangler deploy
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: production-web
+      url: ${{ vars.WEB_URL || 'https://is-the-mountain-out.tommy-b-doerr.workers.dev' }}
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || 'd7adee58513c1b2f770ccaac90cf114f' }}
+      WEB_URL: ${{ vars.WEB_URL || 'https://is-the-mountain-out.tommy-b-doerr.workers.dev' }}
+    steps:
+      - name: Preflight — CLOUDFLARE_API_TOKEN must be set
+        run: |
+          if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "CLOUDFLARE_API_TOKEN is present."
+            exit 0
+          fi
+          echo "::error title=CLOUDFLARE_API_TOKEN not set::No Cloudflare credential in this repo. Run: gh secret set CLOUDFLARE_API_TOKEN -R ${GITHUB_REPOSITORY} (see CLAUDE.md for the required token scope). Nothing was deployed."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Build SPA
+        working-directory: web
+        run: npm run build
+
+      - name: wrangler deploy
+        working-directory: web
+        run: npx wrangler deploy
+
+      - name: Summary
+        if: success()
+        run: echo "Deployed \`$GITHUB_SHA\` → $WEB_URL" >> "$GITHUB_STEP_SUMMARY"
