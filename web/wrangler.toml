@@ -17,6 +17,15 @@ name = "is-the-mountain-out"
 main = "worker/index.ts"
 compatibility_date = "2025-04-01"
 
+# The public URL. A Workers custom domain: wrangler creates the DNS record and
+# certificate on the robogeosociety.xyz zone on deploy, which is why the CI
+# token carries zone-scoped Workers Routes + DNS edit (CLAUDE.md → Deployment).
+# The workers.dev hostname stays live alongside it.
+routes = [
+  { pattern = "mountainisout.robogeosociety.xyz", custom_domain = true }
+]
+workers_dev = true
+
 [observability]
 enabled = true
 

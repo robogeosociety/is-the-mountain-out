@@ -85,9 +85,11 @@ Single source of truth for webcam URL, METAR station (`KSEA`), LoRA hyperparamet
 
 ## Deployment (Cloudflare)
 
-Inference runs as the `mountain-inference` Cloudflare Worker + Container (cron `*/15`), with R2 for storage. The public site is a second Worker, **`is-the-mountain-out`** (`web/wrangler.toml`, `https://is-the-mountain-out.tommy-b-doerr.workers.dev`), that serves the Vite build as static assets and answers `/state.json` + `/history.jsonl` same-origin from the R2 binding (`web/worker/index.ts`) — so the SPA has no cross-origin fetch and the bucket's CORS allowlist is out of the request path. That allowlist naming the pre-rename org is what blanked the site for weeks; see README → Outage post-mortem. There is no Cloudflare Pages project (the 2026-05-25 migration described one that was never created); the old GitHub Pages URL still serves a frozen 2026-05-25 build as a fallback.
+Inference runs as the `mountain-inference` Cloudflare Worker + Container (cron `*/15`), with R2 for storage. The public site is a second Worker, **`is-the-mountain-out`** (`web/wrangler.toml`, `https://mountainisout.robogeosociety.xyz` — a Workers custom domain on the `robogeosociety.xyz` zone; the `is-the-mountain-out.tommy-b-doerr.workers.dev` hostname stays live alongside it), that serves the Vite build as static assets and answers `/state.json` + `/history.jsonl` same-origin from the R2 binding (`web/worker/index.ts`) — so the SPA has no cross-origin fetch and the bucket's CORS allowlist is out of the request path. That allowlist naming the pre-rename org is what blanked the site for weeks; see README → Outage post-mortem. There is no Cloudflare Pages project (the 2026-05-25 migration described one that was never created); the old GitHub Pages URL still serves a frozen 2026-05-25 build as a fallback.
 
 **The site deploys from CI too — `.github/workflows/deploy-web.yml`**, on a push to `main` touching `web/**` (or `gh workflow run deploy-web.yml`): `web-ci.yml` (lint + `tsc -b` + vite build, the PR gate) then `npx wrangler deploy` in the `production-web` environment. By hand: `cd web && npm run deploy`. `vite dev` proxies `/state.json` to the bucket's r2.dev URL so the SPA code is identical in both.
+
+**The site has its own CI credential — `CLOUDFLARE_API_TOKEN_WEB`**, vended from `cloudflare-tfvend` (`is_the_mountain_out.tf`, output `is_the_mountain_out_web_deploy`): `Workers Scripts: Edit` on the account plus `Workers Routes: Edit` scoped to the `robogeosociety.xyz` zone, because the custom domain in `web/wrangler.toml` is reconciled on every deploy via the zone's workers-routes API. It is deliberately not the inference Worker's `CLOUDFLARE_API_TOKEN` below: that token carries `Containers: Edit` and no zone grant, this one the reverse, so neither job's credential can do the other's work. Rotate or re-set it with `make -s output T=is_the_mountain_out_web_deploy | gh secret set CLOUDFLARE_API_TOKEN_WEB -R robogeosociety/is-the-mountain-out` on the Mac mini.
 
 **The Worker deploys from CI — `.github/workflows/deploy-worker.yml`.** A push to `main` touching `worker/**` (or `gh workflow run deploy-worker.yml`) runs the worker tests + typecheck, then `npx wrangler deploy`, inside the `production` GitHub environment. Deploys are serialized (`cancel-in-progress: false`): one in flight is never cancelled. To require human approval, add a required reviewer to the `production` environment — no workflow change needed.
 
@@ -111,7 +113,7 @@ Required permissions — **two**, both **Account**-scoped and restricted to that
 
 | Permission | Why |
 | --- | --- |
-| `Workers Scripts: Edit` | Script upload, and with it the DO + R2 bindings, the `new_sqlite_classes` migration, and the `[triggers] crons` schedule. Non-negotiable. Also everything `deploy-web.yml` needs: the static-assets upload rides on the same permission. |
+| `Workers Scripts: Edit` | Script upload, and with it the DO + R2 bindings, the `new_sqlite_classes` migration, and the `[triggers] crons` schedule. Non-negotiable. |
 | `Containers: Edit` | `wrangler.toml` has a `[[containers]]` block, so every deploy also PATCHes the container application (`/accounts/{id}/containers/applications`) with the image ref, `max_instances`, `instance_type`. Without it the script uploads and the container step 403s. |
 
 Deliberately **not** granted, each for a reason:
@@ -119,7 +121,7 @@ Deliberately **not** granted, each for a reason:
 - `Workers R2 Storage: Edit` — an `[[r2_buckets]]` entry with an explicit `bucket_name` is pure script metadata; wrangler makes no R2 call. It only provisions buckets under the opt-in `--x-provision` flag. Add this only if CI ever runs `wrangler r2 …` itself (e.g. pushing a checkpoint).
 - `Cloudflare Images: Edit` — a different product entirely (imagedelivery.net). Managed-registry auth is brokered through the *containers* API, and CI does not push images anyway.
 - `User Details: Read` / `Memberships: Read` — only needed when wrangler has to discover the account. The workflow sets `CLOUDFLARE_ACCOUNT_ID`, so `/accounts` and `/memberships` are never called. Keep that env var: an account-owned token *cannot* carry User-scoped permissions (`/memberships` returns error 9106), so it is effectively mandatory there.
-- `Workers Routes: Edit` (zone) — the Worker is `workers.dev` + cron only, no zone routes.
+- `Workers Routes: Edit` (zone) — the inference Worker is `workers.dev` + cron only, no zone routes. The *site* Worker does need it, which is exactly why the site deploys with its own `CLOUDFLARE_API_TOKEN_WEB` (above) instead of this token.
 
 Cloudflare's stock **"Edit Cloudflare Workers"** template is *not* sufficient on its own: it omits Containers. If an unexplained 403 appears, that template **plus `Containers: Edit`** is the low-risk superset. (Known upstream wrinkle: [workers-sdk#12483](https://github.com/cloudflare/workers-sdk/issues/12483) — `/containers/applications` 401 despite a valid containers scope.) The token is *only* for CI; the operator's laptop keeps using `wrangler login`.
 
