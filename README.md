@@ -2,7 +2,7 @@
 
 Real-time image classifier that determines whether Mount Rainier is "out" (visible) from a live UW webcam, augmented with METAR weather data. ConvNeXt Tiny backbone + LoRA fine-tuning, trained on Apple Silicon (MPS), served from Cloudflare.
 
-**Live site:** https://is-the-mountain-out.tommy-b-doerr.workers.dev
+**Live site:** https://mountainisout.robogeosociety.xyz (also at https://is-the-mountain-out.tommy-b-doerr.workers.dev)
 Append `?debug` to see confidence bars and the raw METAR readout.
 
 > [!NOTE]

@@ -9,8 +9,13 @@
 # the inference Worker's `production` so the Environments page shows the two
 # things that can be live independently.
 #
-# Auth: the same repo secret `CLOUDFLARE_API_TOKEN`. Uploading a Worker with
-# static assets needs only `Workers Scripts: Edit`, which it already has.
+# Auth: its OWN repo secret, `CLOUDFLARE_API_TOKEN_WEB` — vended from
+# cloudflare-tfvend (is_the_mountain_out.tf) with Workers Scripts Write on the
+# account plus Workers Routes Write on the robogeosociety.xyz zone, which the
+# mountainisout.robogeosociety.xyz custom domain in web/wrangler.toml needs at
+# deploy time. Deliberately not the inference Worker's CLOUDFLARE_API_TOKEN:
+# that one carries Containers Write and must stay zone-less, this one carries a
+# zone grant and must stay container-less. See CLAUDE.md → Deployment.
 name: Deploy Web
 
 on:
@@ -39,19 +44,19 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: production-web
-      url: ${{ vars.WEB_URL || 'https://is-the-mountain-out.tommy-b-doerr.workers.dev' }}
+      url: ${{ vars.WEB_URL || 'https://mountainisout.robogeosociety.xyz' }}
     env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN_WEB }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || 'd7adee58513c1b2f770ccaac90cf114f' }}
-      WEB_URL: ${{ vars.WEB_URL || 'https://is-the-mountain-out.tommy-b-doerr.workers.dev' }}
+      WEB_URL: ${{ vars.WEB_URL || 'https://mountainisout.robogeosociety.xyz' }}
     steps:
-      - name: Preflight — CLOUDFLARE_API_TOKEN must be set
+      - name: Preflight — CLOUDFLARE_API_TOKEN_WEB must be set
         run: |
           if [ -n "${CLOUDFLARE_API_TOKEN:-}" ]; then
-            echo "CLOUDFLARE_API_TOKEN is present."
+            echo "CLOUDFLARE_API_TOKEN_WEB is present."
             exit 0
           fi
-          echo "::error title=CLOUDFLARE_API_TOKEN not set::No Cloudflare credential in this repo. Run: gh secret set CLOUDFLARE_API_TOKEN -R ${GITHUB_REPOSITORY} (see CLAUDE.md for the required token scope). Nothing was deployed."
+          echo "::error title=CLOUDFLARE_API_TOKEN_WEB not set::No site-deploy credential in this repo. Vend it from cloudflare-tfvend (is_the_mountain_out.tf) and run: gh secret set CLOUDFLARE_API_TOKEN_WEB -R ${GITHUB_REPOSITORY} (see CLAUDE.md → Deployment). Nothing was deployed."
           exit 1
 
       - uses: actions/checkout@v4
