@@ -588,6 +588,38 @@ def live(config: str, data_root: str):
         logging.info("Stopping live collection.")
 
 
+@cli.command("capture-once")
+@click.option("--config", default="mountain.toml", help="Path to config file.")
+@click.option("--data-root", default="data", help="Root directory for data storage.")
+@click.option(
+    "--print-key",
+    is_flag=True,
+    help="Print the saved frame's key relative to --data-root (and nothing else) "
+    "on success, for the caller to hand to inference.",
+)
+def capture_once(config: str, data_root: str, print_key: bool):
+    """One webcam frame + METAR into --data-root, then exit.
+
+    The headless single-shot the 15-minute LaunchAgent tick uses (mini/tick.sh).
+    Unlike `once`, it starts no tray, no thread and no session bookkeeping — a
+    launchd job should do one thing and die. Exits non-zero if nothing was
+    captured, so the tick can log a failed frame without publishing a lie.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    config_loader = ConfigLoader(config)
+    weather_fetcher = WeatherFetcher(config_loader.metar_station)
+
+    image_path = perform_capture(config_loader, weather_fetcher, data_root)
+    if not image_path:
+        raise SystemExit(1)
+
+    if print_key:
+        click.echo(str(Path(image_path).relative_to(Path(data_root))))
+
+
 cli.add_command(sync)
 
 if __name__ == "__main__":

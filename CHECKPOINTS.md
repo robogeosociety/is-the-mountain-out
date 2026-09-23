@@ -26,11 +26,14 @@ This document catalogs the major model checkpoints saved during the project's de
 - **Strategy:** Fresh ConvNeXt weights fine-tuned with 78x oversampling on "Full" and 11x on "Partial".
 - **Status:** Superseded by the scheduled-run era (below).
 
-### 4. R2 `checkpoints/` (Live — scheduled-run era, 2026-07-26 →)
-- **Weights left git on 2026-07-26.** The live checkpoint is the R2
-  `checkpoints/` object set, rewritten by the weekly supervisor-scheduled
-  retrain (`TRAINING.md`); `train/checkpoints/` is an untracked local working
-  copy, and `load_checkpoint` pulls from R2 when it's missing. Committing the
+### 4. Dev-disk `checkpoints/` (Live — scheduled-run era, 2026-07-26 →)
+- **Weights left git on 2026-07-26.** The live checkpoint was the R2
+  `checkpoints/` object set until 2026-09; it is now
+  `/Volumes/dev/mountain/checkpoints/` on the mini (pulled out of R2 once by
+  `mini/r2-pull.sh`, backed up nightly by restic), rewritten by the weekly
+  supervisor-scheduled retrain (`TRAINING.md`) and loaded directly by the
+  15-minute tick. `train/checkpoints/` is an untracked local working
+  copy. Committing the
   binaries had two failure modes: the mini's checkout went permanently dirty
   after every scheduled run, and the committed copy silently drifted stale
   behind the model actually serving.

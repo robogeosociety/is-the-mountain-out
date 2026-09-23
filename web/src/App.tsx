@@ -60,9 +60,13 @@ const PRESENTATION: Record<ClassName | 'unknown', Presentation> = {
 }
 
 const STALE_MS = 60 * 60 * 1000
-// Same-origin: the Worker in ../worker/index.ts serves it from R2, and
-// `vite dev` proxies it (vite.config.ts). No cross-origin fetch, no CORS.
-const STATE_URL = '/state.json'
+// Relative to the deployed base path, not the domain root. The publish
+// workflow copies state.json in beside index.html, so the site is correct both
+// on the custom domain (mountainisout.robogeosociety.xyz/) and on the project
+// Pages fallback (robogeosociety.github.io/is-the-mountain-out/). It used to be
+// an absolute '/state.json' answered by a Cloudflare Worker from R2; that whole
+// path is gone.
+const STATE_URL = `${import.meta.env.BASE_URL}state.json`
 
 function formatRelative(iso: string | null, now: number): string {
   if (!iso) return 'never'

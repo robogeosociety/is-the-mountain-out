@@ -36,15 +36,23 @@ collection_seconds = 600 # 10 minutes for collection service (interval-based)
 # schedule = { Minute = 0 } # Optional: Run every hour on the hour (calendar-based)
 
 [storage]
-backend = "r2"
-r2_account_id = "d7adee58513c1b2f770ccaac90cf114f"
-r2_bucket = "is-the-mountain-out"
+# Local since 2026-09: captures, labels and checkpoints live on the Mac mini's
+# dev disk (/Volumes/dev/mountain/), pulled out of R2 once by mini/r2-pull.sh.
+# The R2 backend still exists in collect/storage.py — set backend = "r2" plus
+# r2_account_id/r2_bucket to use it — but nothing in the live path does.
+backend = "local"
 cache_dir = ".r2cache"
 
 [bot]
 # Discord reaction-labeling bot (BOT.md). Secrets + channel/user ids live in
-# cf.env; this section is behavior tuning only. The bot never posts on a
-# schedule — the Worker's visibility-change notifications are the labeling
-# surface — so there is no posting interval or daylight window to tune.
+# cf.env (gitignored; DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID,
+# DISCORD_ALLOWED_USER_IDS). This section is behavior tuning only. The bot never
+# posts on a schedule — visibility changes are the labeling surface — so there
+# is no posting interval or daylight window to tune.
 sweep_hours = 72 # startup sweep re-reads this much channel history for missed reactions
-state_url = "https://pub-66d3d1f139004e29b2afcb5fba49bdb3.r2.dev/state.json" # public bucket; `bot post-once` shows the model's live prediction
+# `bot post-once` shows the model's live prediction. Served by GitHub Pages now;
+# the mini can also read /Volumes/dev/mountain/live/state.json directly.
+state_url = "https://mountainisout.robogeosociety.xyz/state.json"
+# Announcements the 15-minute tick has queued for the bot to post
+# (tools/predict_state.py --announce). One JSON object per line.
+announce_queue = "/Volumes/dev/mountain/live/announce.jsonl"

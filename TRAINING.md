@@ -20,7 +20,7 @@ the mountain-specific instance.
 
    Labels arrive from two surfaces that share one `labels.yaml` (union-merged,
    R2 as source of truth): the bulk classifier UI (`uv run classify start`) and
-   the Discord reaction-labeling bot (👍/⛅/👎 on the Worker's alerts and
+   the Discord reaction-labeling bot (👍/⛅/👎 on the tick's alerts and
    label requests — see `BOT.md`). A batch run picks both up with no extra flags.
 
    **Scheduled runs:** the robogeosociety/supervisor fires
@@ -35,18 +35,20 @@ the mountain-specific instance.
 
    (the `training` console script → `train.scheduler:app`.)
 
-2. **Training runs locally on the most capable machine, *not* under Nomad.** It
+2. **Training runs locally on the most capable machine, on demand.** It
    prefetches the dataset from R2 and runs gradient descent on MPS — RAM-heavy and
    worth watching the per-epoch val loss for — so run it interactively on the best
-   hardware available, not pinned to the weak always-on node. **Nomad here is
+   hardware available, not pinned to the weak always-on node. **Scheduling here is
    reserved for the always-on collector service** (`collect.hcl`) plus the one-shot
    *capture* jobs (`once.hcl`, `capture_out.hcl`); training is a different shape and
    does not belong there.
 
 3. **Adapters/checkpoints land where serving auto-discovers them:** the best
    checkpoint (by val loss) is written to `train/checkpoints/` (via
-   `ConfigLoader.checkpoint_dir`) and uploaded to R2 for the inference container to
-   pull on cold start. See `CHECKPOINTS.md` for model history.
+   `ConfigLoader.checkpoint_dir`) — on the mini, `--checkpoint-dir
+   /Volumes/dev/mountain/checkpoints`, which the next 15-minute tick loads
+   straight off the disk (it used to be uploaded to R2 for the inference
+   container to pull on cold start). See `CHECKPOINTS.md` for model history.
 
 4. **Weights and training data stay out of git** (see `.gitignore`). True in
    full since 2026-07-26 — the live `train/checkpoints/` weights were
@@ -69,7 +71,7 @@ the model detects fog.
 | **macro-F1** | Averaged over classes, so the majority class can't carry it. The all-"Not Out" predictor scores **0.31** here against 0.86 accuracy. This is the headline. |
 | **balanced accuracy** | Mean per-class recall. Chance is 33.3%; the degenerate predictor scores exactly that. |
 | per-class precision / recall / F1 / support | Where the errors actually are. `support` is printed everywhere on purpose — see the caveat below. |
-| **visible (Full+Partial vs Not Out)** | The product question, and what the Worker's alerts key on. Precision leads: the repo's constraint is *precision over recall* — a false positive is an alert claiming the mountain is out when it isn't. |
+| **visible (Full+Partial vs Not Out)** | The product question, and what the channel's alerts key on. Precision leads: the repo's constraint is *precision over recall* — a false positive is an alert claiming the mountain is out when it isn't. |
 | 3x3 confusion matrix | Rows = truth, columns = prediction. |
 
 These land in `--json-summary` (`best_val_metrics`), in every `per_epoch` record

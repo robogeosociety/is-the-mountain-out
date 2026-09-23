@@ -1,6 +1,14 @@
 """Single-shot inference: fetch webcam + METAR, write state.json.
 
-Used by `.github/workflows/update.yml` on a 15-minute schedule.
+This is the whole inference path since 2026-09. It runs natively on the Mac
+mini once every 15 minutes, driven by `mini/tick.sh` (LaunchAgent) — no
+container, no Cloudflare Worker, no network storage. It writes `state.json`,
+appends `history.jsonl`, and, when the channel has something worth saying,
+appends a record to `announce.jsonl` for the Discord bot to drain. Publishing
+those two files to GitHub Pages is `.github/workflows/publish.yml`'s job.
+
+The announce queue is deliberately a *file*: the tick must never block on
+Discord, and a bot restart must not lose an alert.
 """
 
 import argparse
@@ -23,6 +31,13 @@ from torchvision import transforms
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from bot.transition import (  # noqa: E402
+    DEFAULT_ALERT_MIN_CONFIDENCE,
+    DEFAULT_LABEL_COOLDOWN_SECONDS,
+    NotifyState,
+    binary_confidence,
+    decide_transition,
+)
 from train.config_loader import ConfigLoader  # noqa: E402
 from train.model import ConvNextLoRAModel  # noqa: E402
 
@@ -91,9 +106,17 @@ def git_short_sha() -> str | None:
         return None
 
 
-def predict(checkpoint_dir: str, webcam_url: str, station: str, storage=None) -> dict:
+def predict(
+    checkpoint_dir: str,
+    webcam_url: str,
+    station: str,
+    storage=None,
+    device: str = "mps",
+) -> dict:
+    # ConvNextLoRAModel downgrades to CPU on its own when MPS is unavailable, so
+    # "mps" is safe to ask for on a Linux runner or an Intel Mac.
     model = ConvNextLoRAModel(
-        num_classes=3, checkpoint_dir=checkpoint_dir, device="cpu", storage=storage
+        num_classes=3, checkpoint_dir=checkpoint_dir, device=device, storage=storage
     )
     model.model_dict.eval()
 
@@ -129,6 +152,66 @@ def _append_log(log_path: Path, record: dict) -> None:
         f.write(json.dumps(record, sort_keys=True) + "\n")
 
 
+def _queue_announcement(
+    announce_path: Path,
+    notify_state_path: Path,
+    state: dict,
+    capture_key: str | None,
+    alert_min_confidence: float,
+    label_cooldown_hours: float,
+) -> str:
+    """Run the alert/label state machine and queue anything worth posting.
+
+    Returns the decision kind ("alert", "label" or "quiet"). Never raises into
+    the tick: a broken queue must not cost us a `state.json` write, which is
+    what the site actually serves.
+    """
+    try:
+        previous = NotifyState.from_dict(
+            json.loads(notify_state_path.read_text())
+            if notify_state_path.exists()
+            else None
+        )
+    except OSError, ValueError:
+        previous = NotifyState()
+
+    is_out = bool(state["is_out"])
+    confidence = binary_confidence(state.get("confidence") or {}, is_out)
+    now = state["timestamp_utc"]
+
+    decision = decide_transition(
+        previous,
+        is_out,
+        confidence,
+        now,
+        alert_min_confidence=alert_min_confidence,
+        label_cooldown_seconds=label_cooldown_hours * 3600,
+    )
+
+    if decision.kind != "quiet":
+        _append_log(
+            announce_path,
+            {
+                "queued_at": now,
+                "kind": decision.kind,
+                "is_out": is_out,
+                "class_name": state.get("class_name"),
+                "binary_confidence": confidence,
+                "previously_announced_is_out": previous.announced_is_out,
+                # The frame this tick captured, as a key under the data root —
+                # the bot attaches it and footers the key so a reaction becomes
+                # a training label.
+                "capture_key": capture_key,
+                "state": state,
+                "posted": False,
+            },
+        )
+
+    notify_state_path.parent.mkdir(parents=True, exist_ok=True)
+    notify_state_path.write_text(json.dumps(decision.next.to_dict(), indent=2) + "\n")
+    return decision.kind
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run a single visibility prediction and write state.json."
@@ -140,15 +223,57 @@ def main() -> int:
         default="web/public/history.jsonl",
         help="Append a structured JSONL record (success or error) for each invocation.",
     )
+    parser.add_argument(
+        "--checkpoint-dir",
+        default=None,
+        help="Override [training].checkpoint_dir — on the mini this is a path on "
+        "the dev disk, so inference never reaches for network storage.",
+    )
+    parser.add_argument(
+        "--device",
+        default="mps",
+        help="Torch device. 'mps' silently falls back to CPU where MPS is absent.",
+    )
+    parser.add_argument(
+        "--announce",
+        default=None,
+        help="Append alert/label-request records here for the Discord bot to "
+        "drain (e.g. /Volumes/dev/mountain/live/announce.jsonl). Omit to skip.",
+    )
+    parser.add_argument(
+        "--notify-state",
+        default=None,
+        help="Where the announce state machine persists (defaults to "
+        "notify-state.json beside --announce).",
+    )
+    parser.add_argument(
+        "--alert-min-confidence",
+        type=float,
+        default=DEFAULT_ALERT_MIN_CONFIDENCE,
+        help="Binary confidence at or above which a held change is announced.",
+    )
+    parser.add_argument(
+        "--label-cooldown-hours",
+        type=float,
+        default=DEFAULT_LABEL_COOLDOWN_SECONDS / 3600,
+        help="Minimum gap between label requests.",
+    )
+    parser.add_argument(
+        "--capture-key",
+        default=None,
+        help="Key of the frame this tick captured, relative to the data root; "
+        "carried into the announce record so a reaction becomes a label.",
+    )
     args = parser.parse_args()
 
     config = ConfigLoader(args.config)
+    checkpoint_dir = args.checkpoint_dir or config.checkpoint_dir
 
     started_at = datetime.now(timezone.utc)
     record: dict = {
         "started_at": _iso_utc(started_at),
         "config": {
-            "checkpoint_dir": config.checkpoint_dir,
+            "checkpoint_dir": checkpoint_dir,
             "webcam_url": config.webcam_url,
             "station": config.metar_station,
         },
@@ -158,16 +283,44 @@ def main() -> int:
     exit_code = 0
     try:
         state = predict(
-            checkpoint_dir=config.checkpoint_dir,
+            checkpoint_dir=checkpoint_dir,
             webcam_url=config.webcam_url,
             station=config.metar_station,
+            device=args.device,
         )
         out_path = Path(args.out)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(state, indent=2) + "\n")
+        # Write via a temp file + rename: the publish workflow may read this
+        # file at any moment, and a half-written state.json is a broken site.
+        tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(state, indent=2) + "\n")
+        tmp_path.replace(out_path)
         print(json.dumps(state, indent=2))
         record["status"] = "ok"
         record["state"] = state
+
+        if args.announce:
+            announce_path = Path(args.announce)
+            notify_state_path = (
+                Path(args.notify_state)
+                if args.notify_state
+                else announce_path.parent / "notify-state.json"
+            )
+            try:
+                record["announced"] = _queue_announcement(
+                    announce_path,
+                    notify_state_path,
+                    state,
+                    args.capture_key,
+                    args.alert_min_confidence,
+                    args.label_cooldown_hours,
+                )
+            except Exception as exc:  # the site matters more than the channel
+                record["announced"] = "error"
+                print(
+                    f"Announce queue failed: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
     except Exception as exc:
         record["status"] = "error"
         record["error"] = {

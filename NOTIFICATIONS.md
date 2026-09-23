@@ -1,6 +1,21 @@
 # Notifications
 
-The `mountain-inference` Cloudflare Worker posts to Discord whenever the answer
+> [!IMPORTANT]
+> **Updated 2026-09 — the Worker is gone; the policy is not.** Every rule below
+> (two-tick debounce, the alert/label routing, the confidence gates, silent
+> re-adoption on a lost state file) still holds — it was ported verbatim from
+> `worker/src/transition.ts` to `bot/transition.py`. What changed is the
+> plumbing: the mini's 15-minute tick (`mini/tick.sh` →
+> `tools/predict_state.py --announce`) *decides* and appends the post to
+> `/Volumes/dev/mountain/live/announce.jsonl`; the single Discord bot drains
+> that queue and posts it. Where this file says "the Worker", read "the tick".
+> `notify-state.json` is now a file in `live/`, not an R2 object; the
+> thresholds are `--alert-min-confidence` / `--label-cooldown-hours` rather
+> than `wrangler.toml [vars]`; and there is no `/notify-test` endpoint or
+> `wrangler tail` — run `just tick-local` and read
+> `~/Library/Logs/mountain-tick.err.log`.
+
+The tick posts to Discord whenever the answer
 to "is the mountain out?" changes. Discord delivers to desktop and mobile with
 no per-IP rate limit (which is why it replaced the old ntfy.sh path — anonymous
 ntfy publishing returned HTTP 429 from Cloudflare's shared egress IPs).

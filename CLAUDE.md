@@ -21,7 +21,7 @@ uv run training once        # single capture + train cycle
 uv run training batch data/20260222  # offline batch training on labeled dataset
 
 # Data collection
-uv run collect collect      # single capture (all webcams + METAR)
+uv run collect capture-once # one headless capture (webcam + METAR); prints the key
 uv run collect live         # continuous collection loop
 
 # Classification UI (FastAPI + Vite)
@@ -32,12 +32,11 @@ uv run classify stop
 uv run --group bot bot run           # reaction labeling + startup sweep
 uv run --group bot bot post-once     # one labelable post, then exit (setup check)
 
-# Nomad job management
-nomad job run nomad/collect.hcl          # start collector tray
-nomad job run nomad/bot.hcl              # start Discord labeling bot
-nomad job status mountain-collector      # check status
-nomad alloc logs <alloc-id>              # view logs
-nomad alloc logs -stderr <alloc-id>      # view error logs
+# The production tick (what launchd runs on the mini every 15 minutes)
+just tick                   # probe + capture + native inference + publish
+just tick-local             # the same, without dispatching the Pages deploy
+just publish                # gh workflow run publish.yml
+just install-agent          # (re)install the LaunchAgent — GUI session only
 ```
 
 ### Frontend (ui/)
@@ -65,7 +64,8 @@ The `batch` command splits train/val **stratified per class, on unique labels, b
 
 ### Evaluation metrics (`train/metrics.py`)
 
-**Accuracy is not the metric here.** The label set is 86.3% Not Out, so always answering "Not Out" scores 86.3%. Every validation pass builds a 3x3 confusion matrix and derives per-class precision/recall/F1/support, **macro-F1**, **balanced accuracy**, and a **Full+Partial "visible" binary view** — the last being the product question and what the Worker's alerts key on. Pure torch/stdlib arithmetic; scikit-learn stays a `dev`-group dependency. Results flow to `--json-summary` (`best_val_metrics`), each `per_epoch` record (`val_metrics`), `--progress-jsonl`, and the Discord embeds, which lead with macro-F1. All consumers tolerate the fields being absent (older runs). Details + the small-sample caveat: `TRAINING.md`.
+**Accuracy is not the metric here.** The label set is 86.3% Not Out, so always answering "Not Out" scores 86.3%. Every validation pass builds a 3x3 confusion matrix and derives per-class precision/recall/F1/support, **macro-F1**, **balanced accuracy**, and a **Full+Partial "visible" binary view** — the last being the product question and what the channel's alerts key on
+(`bot/transition.py`). Pure torch/stdlib arithmetic; scikit-learn stays a `dev`-group dependency. Results flow to `--json-summary` (`best_val_metrics`), each `per_epoch` record (`val_metrics`), `--progress-jsonl`, and the Discord embeds, which lead with macro-F1. All consumers tolerate the fields being absent (older runs). Details + the small-sample caveat: `TRAINING.md`.
 
 ### Data Collection (`collect/collector.py`)
 
@@ -77,59 +77,73 @@ FastAPI server writes its port to `data/classifier_server.port` at startup (dyna
 
 ### Discord labeling bot (`bot/`)
 
-Gateway bot (discord.py, `bot` dependency group) that records 👍/⛅/👎 reactions as Full/Partial/Not-Out labels — the mobile counterpart to the classifier UI. **It does not post on a schedule**: the Worker's visibility-change notifications are the labeling surface, and the Worker writes them with *this bot's token* so they are bot-authored. That is load-bearing — without the privileged Message Content intent Discord blanks the embeds of any other author's messages, so while notifications came from a webhook the capture-key footer was unreadable and every reaction on one was silently dropped. `bot/labeler.py` is pure logic (emoji normalization, capture-key footers, union-merge into the shared `labels.yaml`); `bot/main.py` is the discord.py wiring (`on_raw_reaction_add`, startup sweep of missed reactions, and `post-once` as a manual setup check). See `BOT.md`.
+Gateway bot (discord.py, `bot` dependency group) that records 👍/⛅/👎 reactions as Full/Partial/Not-Out labels — the mobile counterpart to the classifier UI. **It does not post on a schedule**: visibility-change notifications are the labeling surface. The mini's tick queues them to `/Volumes/dev/mountain/live/announce.jsonl` and the bot posts them *as itself* (until 2026-09 the Cloudflare Worker posted them using this bot's token, for the same reason). That is load-bearing — without the privileged Message Content intent Discord blanks the embeds of any other author's messages, so while notifications came from a webhook the capture-key footer was unreadable and every reaction on one was silently dropped. `bot/labeler.py` is pure logic (emoji normalization, capture-key footers, union-merge into the shared `labels.yaml`); `bot/main.py` is the discord.py wiring (`on_raw_reaction_add`, startup sweep of missed reactions, and `post-once` as a manual setup check). See `BOT.md`.
 
 ### Configuration (`mountain.toml`)
 
 Single source of truth for webcam URL, METAR station (`KSEA`), LoRA hyperparameters, checkpoint directory, collection intervals, and training schedule. Loaded via `train/config_loader.py`.
 
-## Deployment (Cloudflare)
+## Deployment (Mac mini + GitHub Pages)
 
-Inference runs as the `mountain-inference` Cloudflare Worker + Container (cron `*/15`), with R2 for storage. The public site is a second Worker, **`is-the-mountain-out`** (`web/wrangler.toml`, `https://is-the-mountain-out.tommy-b-doerr.workers.dev`), that serves the Vite build as static assets and answers `/state.json` + `/history.jsonl` same-origin from the R2 binding (`web/worker/index.ts`) — so the SPA has no cross-origin fetch and the bucket's CORS allowlist is out of the request path. That allowlist naming the pre-rename org is what blanked the site for weeks; see README → Outage post-mortem. There is no Cloudflare Pages project (the 2026-05-25 migration described one that was never created); the old GitHub Pages URL still serves a frozen 2026-05-25 build as a fallback.
+Since 2026-09 there is no Cloudflare in the live path — no Worker, no Container,
+no R2, no Nomad, no `wrangler` in the tree. The previous arrangement (a `*/15`
+cron Worker calling a Container, writing state to R2, a second Worker serving
+the SPA) had been failing since 2026-09-15 and was the only thing forcing the
+Workers Paid plan.
 
-**The site deploys from CI too — `.github/workflows/deploy-web.yml`**, on a push to `main` touching `web/**` (or `gh workflow run deploy-web.yml`): `web-ci.yml` (lint + `tsc -b` + vite build, the PR gate) then `npx wrangler deploy` in the `production-web` environment. By hand: `cd web && npm run deploy`. `vite dev` proxies `/state.json` to the bucket's r2.dev URL so the SPA code is identical in both.
+**The tick (`mini/`).** `com.robogeosociety.mountain-tick.plist` runs
+`mini/tick.sh` every 900s on the mini. It (1) bounded-probes `/Volumes/dev` in a
+child process and exits if the probe does not return within 5s, (2) runs
+`collect capture-once`, (3) runs `tools/predict_state.py` natively on MPS with a
+checkpoint from `/Volumes/dev/mountain/checkpoints`, writing
+`live/state.json` (temp file + rename) and appending `live/history.jsonl`, and
+(4) fires `gh workflow run publish.yml`. Read `mini/README.md` before touching
+any of it.
 
-**The Worker deploys from CI — `.github/workflows/deploy-worker.yml`.** A push to `main` touching `worker/**` (or `gh workflow run deploy-worker.yml`) runs the worker tests + typecheck, then `npx wrangler deploy`, inside the `production` GitHub environment. Deploys are serialized (`cancel-in-progress: false`): one in flight is never cancelled. To require human approval, add a required reviewer to the `production` environment — no workflow change needed.
+Three things about that script are load-bearing:
 
-The GitHub Deployment record comes free with the job's `environment:` key: Actions itself opens a deployment and moves it `in_progress` → `success`/`failure`, with `environment_url` and a `log_url` to the run. That is *exactly* the bookkeeping `scripts/deploy-worker.sh` does by hand, so the workflow makes **no** explicit deployments-API calls — doing both would put two entries on the Environments page per deploy.
+- **The bounded probe.** `/Volumes/dev` has wedged twice; `access(2)` hangs
+  while `ls` and `df` report a healthy mount. launchd will not start a new
+  instance of a job whose previous one never exited, so an unbounded `stat`
+  here does not fail the tick, it silences the site permanently. The probe runs
+  in a child, the parent kills it at the deadline, and the parent never touches
+  the path itself.
+- **`install.sh` copies the script to `~/.local/libexec`.** launchd exec's the
+  path in `ProgramArguments`; if that path were on the dev disk, a wedge would
+  hang the exec before the script's own probe could run. Re-run `install.sh`
+  after editing `tick.sh` — the agent runs the copy.
+- **Discord is never called from the tick.** Announcements are *queued* to
+  `live/announce.jsonl` (`--announce`), and the single Discord bot drains them.
+  A chat API must not be able to stall a 15-minute job, and a bot restart must
+  not lose an alert.
 
-Deploy paths, in order of preference:
+**The publish (`.github/workflows/publish.yml`).** `workflow_dispatch` (the
+normal path, fired by the tick) plus a `*/15` schedule as a backstop.
+`runs-on: [self-hosted, macOS, fleet]` because the job reads
+`/Volumes/dev/mountain/live` off the runner host; `concurrency: pages`. It
+builds `web/`, copies `state.json` + a bounded tail of `history.jsonl` into
+`web/dist`, writes `CNAME` (`mountainisout.robogeosociety.xyz`) and
+`.nojekyll` into the artifact, then `configure-pages` +
+`upload-pages-artifact` + `deploy-pages`. It refuses to publish a missing or
+unparseable `state.json` — a site stuck on "CHECKING…" looks like a front-end
+bug and is not one.
 
-- **CI (normal):** the workflow above. Auth is the repo secret `CLOUDFLARE_API_TOKEN`.
-- **`scripts/deploy-worker.sh` (break-glass):** same wrangler deploy + GitHub Deployment, run by a human under their own `wrangler login`. For when Actions is down, the token is expired, or an uncommitted tree must ship. It warns on a dirty tree, because the Deployment it records then points at a ref that does not match what went live.
-- **Terraform (`scripts/deploy-inference.sh` + `terraform/`):** aspirational only — the `terraform/` dir does not exist and the script's TF path is stale. Do not rely on it.
+The SPA fetches `` `${import.meta.env.BASE_URL}state.json` `` and vite's `base`
+is `'./'`, so one artifact is correct both on the custom domain and on the
+`robogeosociety.github.io/is-the-mountain-out/` fallback. Do not reintroduce an
+absolute `/state.json`: it 404s on the project-pages path.
 
-The container image is *not* built or pushed by this workflow. `worker/wrangler.toml` pins an already-pushed tag in Cloudflare's managed registry; `.github/workflows/build-inference-image.yml` builds to GHCR and the `registry.cloudflare.com` push is still manual (`wrangler containers push`).
+**Announcement policy** lives in `bot/transition.py` (a port of the Worker's
+`transition.ts`, rules unchanged): a change must hold two consecutive ticks
+*and* clear `--alert-min-confidence` (0.85 binary) to alert; an unsure tick
+instead queues a 🤔 label request, rate-limited by `--label-cooldown-hours`.
+`live/notify-state.json` carries the state machine between ticks. Tests:
+`uv run pytest bot/tests/test_transition.py`.
 
-**CI credential — `CLOUDFLARE_API_TOKEN`.** The workspace rule is "auth via code flow, never mint tokens", but headless CI cannot run `wrangler login`'s browser flow, so a scoped API token is the sanctioned exception. Create it at *My Profile → API Tokens → Create Token*, scoped to account `d7adee58513c1b2f770ccaac90cf114f`, then:
-
-```sh
-gh secret set CLOUDFLARE_API_TOKEN -R robogeosociety/is-the-mountain-out
-```
-
-Required permissions — **two**, both **Account**-scoped and restricted to that one account:
-
-| Permission | Why |
-| --- | --- |
-| `Workers Scripts: Edit` | Script upload, and with it the DO + R2 bindings, the `new_sqlite_classes` migration, and the `[triggers] crons` schedule. Non-negotiable. Also everything `deploy-web.yml` needs: the static-assets upload rides on the same permission. |
-| `Containers: Edit` | `wrangler.toml` has a `[[containers]]` block, so every deploy also PATCHes the container application (`/accounts/{id}/containers/applications`) with the image ref, `max_instances`, `instance_type`. Without it the script uploads and the container step 403s. |
-
-Deliberately **not** granted, each for a reason:
-
-- `Workers R2 Storage: Edit` — an `[[r2_buckets]]` entry with an explicit `bucket_name` is pure script metadata; wrangler makes no R2 call. It only provisions buckets under the opt-in `--x-provision` flag. Add this only if CI ever runs `wrangler r2 …` itself (e.g. pushing a checkpoint).
-- `Cloudflare Images: Edit` — a different product entirely (imagedelivery.net). Managed-registry auth is brokered through the *containers* API, and CI does not push images anyway.
-- `User Details: Read` / `Memberships: Read` — only needed when wrangler has to discover the account. The workflow sets `CLOUDFLARE_ACCOUNT_ID`, so `/accounts` and `/memberships` are never called. Keep that env var: an account-owned token *cannot* carry User-scoped permissions (`/memberships` returns error 9106), so it is effectively mandatory there.
-- `Workers Routes: Edit` (zone) — the Worker is `workers.dev` + cron only, no zone routes.
-
-Cloudflare's stock **"Edit Cloudflare Workers"** template is *not* sufficient on its own: it omits Containers. If an unexplained 403 appears, that template **plus `Containers: Edit`** is the low-risk superset. (Known upstream wrinkle: [workers-sdk#12483](https://github.com/cloudflare/workers-sdk/issues/12483) — `/containers/applications` 401 despite a valid containers scope.) The token is *only* for CI; the operator's laptop keeps using `wrangler login`.
-
-Worker secrets themselves are still set out-of-band with `wrangler secret put` and only go live on the next deploy; CI does not manage them.
-
-Worker secrets (set via `wrangler secret put`):
-- `DISCORD_BOT_TOKEN` / `DISCORD_CHANNEL_ID` — the labeler bot's credentials, so the Worker posts visibility changes *as that bot* and they're reaction-labelable. Same values as `cf.env`. See `NOTIFICATIONS.md`. (Replaced `DISCORD_WEBHOOK_URL`, which made posts unreadable to the bot; delete it with `npx wrangler secret delete DISCORD_WEBHOOK_URL`. The former `NTFY_TOPIC`/`NTFY_TOKEN` ntfy.sh secrets and the gitignored `ntfy.key`/`ntfy-token.key` files are also obsolete.)
-- `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` ← `cf.env` — let the container pull its checkpoint from R2 on cold start.
-
-Confidence routes each tick to one of two posts (`worker/src/transition.ts`, bookkeeping in `notify-state.json`): an **alert** on a visibility change in both directions — debounced over two consecutive ticks and gated on binary confidence ≥ `ALERT_MIN_CONFIDENCE`, so an unsure change is delayed rather than dropped — or a **label request** (🤔 amber) when the model is unsure, rate-limited by `LABEL_COOLDOWN_HOURS`. Both are tunable in `worker/wrangler.toml` `[vars]`. Alerts must be trustworthy; label requests must be informative, which is why one threshold routes between them. Each post attaches the announced frame — never a `webcam_url` link, which would silently become a different picture — and footers its R2 capture key so a reaction becomes a training label. Formatting and delivery: `worker/src/discord-mountain-notify.ts`. Failures are silent: `/notify-test` always returns `202` (publish is queued via `waitUntil`) and Discord errors are only `console.error`'d. To diagnose, `cd worker && npx wrangler tail --format json` and look for `Discord ... failed` or `DISCORD_BOT_TOKEN/DISCORD_CHANNEL_ID not set`. Worker tests: `cd worker && npm test`.
+**Migration leftovers, deliberately kept:** `collect/storage.py` still has the
+R2 backends — `mini/r2-pull.sh` uses them to drain the two buckets onto the dev
+disk once, and `[storage] backend` in `mountain.toml` can still be flipped back
+to `"r2"`. Nothing in the live path does.
 
 ## Key Design Constraints
 
