@@ -11,12 +11,18 @@ interface Weather {
 
 interface State {
   timestamp_utc: string | null
+  // "ok" = a real prediction. "stale" = the camera has been returning the same
+  // bytes for several ticks, so the mini deliberately published no prediction
+  // rather than one from a frozen frame. Optional: older files predate it.
+  status?: 'ok' | 'stale'
+  stale_since?: string | null
   class_index: 0 | 1 | 2 | null
   class_name: ClassName | null
   is_out: boolean | null
   confidence: Record<ClassName, number> | null
   weather: Weather | null
   webcam_url: string
+  frame_sha256?: string | null
   model_version: string | null
 }
 
@@ -28,7 +34,7 @@ interface Presentation {
   accent: string
 }
 
-const PRESENTATION: Record<ClassName | 'unknown', Presentation> = {
+const PRESENTATION: Record<ClassName | 'unknown' | 'frozen', Presentation> = {
   full: {
     headline: 'YES.',
     sub: "She's out.",
@@ -56,6 +62,13 @@ const PRESENTATION: Record<ClassName | 'unknown', Presentation> = {
     bg: 'bg-slate-900',
     fg: 'text-slate-200',
     accent: 'text-slate-400',
+  },
+  frozen: {
+    headline: 'NO IDEA.',
+    sub: 'The camera stopped sending pictures.',
+    bg: 'bg-slate-900',
+    fg: 'text-slate-200',
+    accent: 'text-amber-300',
   },
 }
 
@@ -116,7 +129,15 @@ function App() {
   const className = state?.class_name ?? null
   const timestamp = state?.timestamp_utc ?? null
   const stale = timestamp ? now - Date.parse(timestamp) > STALE_MS : false
-  const key: ClassName | 'unknown' = className && !stale ? className : 'unknown'
+  // A frozen feed is a different failure from a stale file: the mini IS
+  // publishing, on time, and is telling us the camera is dead. Say that,
+  // rather than implying the site itself is broken.
+  const frozen = state?.status === 'stale'
+  const key: ClassName | 'unknown' | 'frozen' = frozen
+    ? 'frozen'
+    : className && !stale
+    ? className
+    : 'unknown'
   const look = PRESENTATION[key]
 
   return (
@@ -130,7 +151,12 @@ function App() {
         </h1>
         <p className="mt-4 text-2xl sm:text-3xl font-medium opacity-90">{look.sub}</p>
         <p className={`mt-10 text-sm uppercase tracking-widest ${look.accent}`}>
-          {stale && timestamp
+          {frozen
+            ? `camera feed frozen — last new frame ${formatRelative(
+                state?.stale_since ?? timestamp,
+                now
+              )}`
+            : stale && timestamp
             ? `stale — last checked ${formatRelative(timestamp, now)}`
             : timestamp
             ? `checked ${formatRelative(timestamp, now)}`
@@ -178,6 +204,10 @@ function DebugPanel({ state }: { state: State }) {
           <div>{weather?.visibility_sm != null ? `${weather.visibility_sm} SM` : '—'}</div>
           <div className="opacity-60">ceiling</div>
           <div>{weather?.ceiling_ft != null ? `${weather.ceiling_ft} ft` : 'none'}</div>
+          <div className="opacity-60">status</div>
+          <div>{state.status ?? 'ok'}</div>
+          <div className="opacity-60">frame</div>
+          <div>{state.frame_sha256?.slice(0, 12) ?? '—'}</div>
           <div className="opacity-60">model</div>
           <div>{state.model_version ?? '—'}</div>
           <div className="opacity-60">timestamp</div>

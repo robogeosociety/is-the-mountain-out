@@ -6,13 +6,33 @@ latitude = 46.8523
 longitude = -121.7603
 
 [webcam]
-name = "UW ATG Webcam 2"
-url = "https://atmos.uw.edu/data/images/webcam2_latest.jpg"
-description = "UW ATG building 7th floor webcam pointing southeast toward Mount Rainier"
-latitude = 47.6533
-longitude = -122.3091
+# KING 5 Queen Anne Tower Camera, primary since 2026-09-24. The UW ATG webcam2
+# feed (atmos.uw.edu/data/images/webcam2_latest.jpg) has 404'd since ~2026-09-15
+# and is gone from UW's server listing — see WEBCAMS.md.
+#
+# This is a PTZ broadcast camera on someone else's CDN, not a fixed research
+# cam: the pointing can drift, so re-verify the framing periodically
+# (WEBCAMS.md has the check). Rainier sits above and just left of the downtown
+# towers, roughly 80x45 px in the 1920x1080 frame — small, but inside the
+# center 224 crop the model sees.
+name = "KING 5 Queen Anne Tower Camera"
+url = "https://cdn.tegna-media.com/king/weather/queenanne.jpg"
+description = "KING 5 tower camera on Queen Anne hill near Kerry Park, looking southeast over downtown Seattle toward Mount Rainier (bearing ~152 deg, 96 km). Plain still JPEG, 1920x1080, refreshes about every 4 minutes."
+latitude = 47.629
+longitude = -122.360
+# Bottom strip the station burns its clock + branding into. Cropped at load
+# time by collect/frame.py, before any resize — never at capture time, so the
+# archive keeps the raw frame.
+crop_bottom_px = 25
+# Consecutive ticks returning byte-identical frames before the feed is called
+# dead and state.json says `status: "stale"` instead of guessing (the feed
+# refreshes ~4x faster than the 15-minute tick, so 3 is already generous).
+stale_after_repeats = 3
 
 [weather]
+# Still KSEA: the view moved across Seattle (UW campus -> Queen Anne), not out
+# of the airport's airmass. Visibility/ceiling at SeaTac remain the right
+# weather features for this sightline.
 station_id = "KSEA"
 description = "Seattle-Tacoma International Airport"
 latitude = 47.4502

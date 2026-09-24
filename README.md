@@ -1,6 +1,6 @@
 # is-the-mountain-out
 
-Real-time image classifier that determines whether Mount Rainier is "out" (visible) from a live UW webcam, augmented with METAR weather data. ConvNeXt Tiny backbone + LoRA fine-tuning, trained and now *served* from Apple Silicon (MPS) on a Mac mini, published as a static site.
+Real-time image classifier that determines whether Mount Rainier is "out" (visible) from a live Seattle webcam, augmented with METAR weather data. ConvNeXt Tiny backbone + LoRA fine-tuning, trained and now *served* from Apple Silicon (MPS) on a Mac mini, published as a static site.
 
 **Live site:** https://mountainisout.robogeosociety.xyz
 (fallback: https://robogeosociety.github.io/is-the-mountain-out/)
@@ -13,8 +13,19 @@ Append `?debug` to see confidence bars and the raw METAR readout.
 > `state.json` to the dev disk, and a GitHub Pages deploy publishes it. No
 > Worker, no Container, no R2, no Nomad. The older outage below is history.
 
+> [!CAUTION]
+> **2026-09-24: the camera changed and the model has not caught up.** UW's ATG
+> webcam 404'd for good on ~2026-09-15 and is gone from their server listing;
+> the feed is now the **KING 5 Queen Anne tower camera** (`WEBCAMS.md`).
+> Different view, so **the existing checkpoint is invalid for this framing and
+> the labels restart from zero** — the site is currently evidence that the
+> pipeline is alive, not that the answer is right. Details, and what it takes
+> to get back to a real model: `TRAINING.md` and `CHECKPOINTS.md`.
+
 ![Mount Rainier Topo Map](assets/map.png)
-*Mount Rainier, the UW ATG webcam (north-northwest), and KSEA METAR station.*
+*Mount Rainier, the webcam (north-northwest) and the KSEA METAR station. The
+camera moved from UW's ATG building to KING 5's Queen Anne tower on 2026-09-24
+— a few km, same sightline; the map is close enough to still read true.*
 
 ## Outage post-mortem (2026-08-07 → 2026-09-02)
 
@@ -85,7 +96,7 @@ flowchart LR
     pages[["GitHub Pages<br/>mountainisout.robogeosociety.xyz"]]
   end
 
-  webcam(["UW ATG webcam"]) --> collector
+  webcam(["KING 5 Queen Anne cam"]) --> collector
   metar(["NOAA METAR (KSEA)"]) --> collector
   webcam --> infer
   metar --> infer
@@ -117,7 +128,7 @@ sequenceDiagram
   participant L as launchd
   participant T as mini/tick.sh
   participant D as /Volumes/dev
-  participant Cam as UW webcam
+  participant Cam as Queen Anne cam
   participant M as NOAA METAR
   participant A as GitHub Actions
   participant P as GitHub Pages
@@ -129,9 +140,13 @@ sequenceDiagram
   else healthy
     T->>Cam: collect capture-once
     T->>M: METAR (KSEA)
-    T->>D: write capture + metar
-    T->>T: predict_state.py (MPS, local checkpoint)
-    T->>D: state.json (atomic) + history.jsonl
+    T->>D: write capture + metar (raw, uncropped)
+    alt same bytes 3 ticks running
+      T->>D: state.json status="stale" — no prediction
+    else fresh frame
+      T->>T: crop burn-in strip, predict_state.py (MPS, local checkpoint)
+      T->>D: state.json (atomic) + history.jsonl
+    end
     opt change confirmed on 2 ticks, or model unsure
       T->>D: append announce.jsonl (bot posts it later)
     end
@@ -164,8 +179,11 @@ sequenceDiagram
 
 ## Current model state
 
-Snapshot of the checkpoint the tick loads, `/Volumes/dev/mountain/checkpoints/`
-on the mini (it was R2 `checkpoints/` until 2026-09):
+**Nothing is trained on the live camera yet.** The table below describes the
+last UW-era checkpoint — the file the tick still loads from
+`/Volumes/dev/mountain/checkpoints/` (it was R2 `checkpoints/` until 2026-09).
+It is a record of what was, not a claim about what the site is currently
+saying; see the caution at the top.
 
 | Field | Value |
 |---|---|
@@ -282,7 +300,12 @@ environments are dead and can be deleted.
 
 Single source of truth: `mountain.toml`.
 
-- `[mountain]`, `[webcam]`, `[weather]` — target mountain + data sources
+- `[mountain]`, `[webcam]`, `[weather]` — target mountain + data sources.
+  `[webcam] crop_bottom_px` drops the station's burn-in clock strip before
+  inference (`collect/frame.py`); `stale_after_repeats` is how many
+  byte-identical frames in a row mean the feed is dead
+  (`collect/freshness.py`) — at which point `state.json` carries
+  `status: "stale"` and **no prediction** rather than reading a frozen picture
 - `[training]` — schedule, gradient accumulation, LoRA hyperparams
 - `[collection]` — capture cadence
 - `[storage]` — `backend = "local"`; the dev disk is the store

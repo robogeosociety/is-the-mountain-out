@@ -8,6 +8,7 @@ import torch
 import typer
 from torch import optim
 
+from collect.frame import CropBurnIn
 from train.config_loader import ConfigLoader
 from train.metrics import compute_metrics, summary_line
 from train.model import ConvNextLoRAModel
@@ -119,7 +120,11 @@ class Trainer:
         weather_vector = self.weather_fetcher.get_weather_vector()
 
         source = self.config_loader.webcam_url
-        stream = WebcamStream(source, device=self.device)
+        stream = WebcamStream(
+            source,
+            device=self.device,
+            crop_bottom_px=self.config_loader.webcam_crop_bottom_px,
+        )
         try:
             tensor = stream.capture_to_tensor()
             if tensor is not None:
@@ -148,7 +153,11 @@ class Trainer:
         try:
             while True:
                 weather_vector = self.weather_fetcher.get_weather_vector()
-                stream = WebcamStream(source, device=self.device)
+                stream = WebcamStream(
+                    source,
+                    device=self.device,
+                    crop_bottom_px=self.config_loader.webcam_crop_bottom_px,
+                )
                 try:
                     tensor = stream.capture_to_tensor()
                     if tensor is not None:
@@ -444,8 +453,13 @@ def batch(
     )
     print(f"Class weights: {class_weights.tolist()}")
 
+    # The burn-in strip is cropped at LOAD time (collect/frame.py), from the
+    # head of both pipelines, so the archive keeps raw frames and changing the
+    # number does not invalidate the captures.
+    crop_bottom_px = trainer.config_loader.webcam_crop_bottom_px
     train_transform = transforms.Compose(
         [
+            CropBurnIn(crop_bottom_px),
             transforms.ToPILImage(),
             transforms.Resize(224),
             transforms.CenterCrop(224),
@@ -458,6 +472,7 @@ def batch(
     )
     val_transform = transforms.Compose(
         [
+            CropBurnIn(crop_bottom_px),
             transforms.ToPILImage(),
             transforms.Resize(224),
             transforms.CenterCrop(224),

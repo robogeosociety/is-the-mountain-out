@@ -25,6 +25,24 @@ class ConfigLoader:
         return self.data["webcam"].get("url", "")
 
     @property
+    def webcam_crop_bottom_px(self) -> int:
+        """Burn-in strip to drop before the model sees a frame.
+
+        Defaults to 0 — a camera without a burn-in strip must not silently
+        lose rows because another camera had one.
+        """
+        return int(self.data["webcam"].get("crop_bottom_px", 0) or 0)
+
+    @property
+    def webcam_stale_after_repeats(self) -> int:
+        """Consecutive byte-identical fetches before the feed is called dead."""
+        from collect.freshness import DEFAULT_STALE_AFTER_REPEATS
+
+        return int(
+            self.data["webcam"].get("stale_after_repeats", DEFAULT_STALE_AFTER_REPEATS)
+        )
+
+    @property
     def schedule_seconds(self) -> int:
         return self.data["training"].get("schedule_seconds", 1800)
 

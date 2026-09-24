@@ -79,6 +79,37 @@ FastAPI server writes its port to `data/classifier_server.port` at startup (dyna
 
 Gateway bot (discord.py, `bot` dependency group) that records 👍/⛅/👎 reactions as Full/Partial/Not-Out labels — the mobile counterpart to the classifier UI. **It does not post on a schedule**: visibility-change notifications are the labeling surface. The mini's tick queues them to `/Volumes/dev/mountain/live/announce.jsonl` and the bot posts them *as itself* (until 2026-09 the Cloudflare Worker posted them using this bot's token, for the same reason). That is load-bearing — without the privileged Message Content intent Discord blanks the embeds of any other author's messages, so while notifications came from a webhook the capture-key footer was unreadable and every reaction on one was silently dropped. `bot/labeler.py` is pure logic (emoji normalization, capture-key footers, union-merge into the shared `labels.yaml`); `bot/main.py` is the discord.py wiring (`on_raw_reaction_add`, startup sweep of missed reactions, and `post-once` as a manual setup check). See `BOT.md`.
 
+### The camera, and why the model is currently wrong
+
+The UW ATG webcam died on ~2026-09-15 (404, removed from UW's listing). Since
+2026-09-24 the feed is the **KING 5 Queen Anne tower camera**
+(`cdn.tegna-media.com/king/weather/queenanne.jpg`, 1920x1080, ~4 min refresh).
+Two consequences an agent must not paper over:
+
+- **The checkpoint is invalid for this framing** and the labels restart from
+  zero. Predictions currently mean nothing; do not tune thresholds or "fix"
+  the model against them, and do not compare any new metric to the UW-era
+  numbers (`CHECKPOINTS.md` splits the two eras for this reason).
+- **It is a PTZ broadcast camera on a station's CDN.** It can be repointed
+  without warning, and Rainier sits near the left edge of the center crop —
+  `WEBCAMS.md` has the framing check; run it when predictions go strange.
+
+Two mechanisms exist because of this camera:
+
+- **`collect/frame.py` — the burn-in crop.** KING 5 burns a clock into the
+  bottom ~25 px; it changes every frame and is the highest-contrast thing in
+  the picture. `CropBurnIn` sits at the head of every transform pipeline
+  (batch train, live train, inference), driven by `[webcam] crop_bottom_px`.
+  Captures are archived **raw** — the crop is a load-time concern, so changing
+  the number does not invalidate the archive.
+- **`collect/freshness.py` — the frozen-feed check.** A dead still camera
+  returns 200 with identical bytes forever, and a classifier is happy to keep
+  predicting on it. Each tick hashes the fetched bytes; after
+  `[webcam] stale_after_repeats` (3) identical fetches, `predict_state.py`
+  skips inference entirely and writes `status: "stale"` with null
+  prediction fields. The alert state machine never sees a stale tick, so a
+  frozen feed cannot produce an announcement.
+
 ### Configuration (`mountain.toml`)
 
 Single source of truth for webcam URL, METAR station (`KSEA`), LoRA hyperparameters, checkpoint directory, collection intervals, and training schedule. Loaded via `train/config_loader.py`.

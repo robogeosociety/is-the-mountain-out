@@ -7,15 +7,22 @@ from typing import Optional, Union
 import requests
 from metar import Metar
 
+from collect.frame import CropBurnIn
+
 
 class WebcamStream:
-    def __init__(self, source: Union[int, str], device: str = "mps"):
+    def __init__(
+        self, source: Union[int, str], device: str = "mps", crop_bottom_px: int = 0
+    ):
         self.source = source
         self.device = device if torch.backends.mps.is_available() else "cpu"
         self.cap = cv2.VideoCapture(source)
 
+        # CropBurnIn first: the station's clock strip must go before any resize
+        # folds it into the rows above it. See collect/frame.py.
         self.transform = transforms.Compose(
             [
+                CropBurnIn(crop_bottom_px),
                 transforms.ToPILImage(),
                 transforms.Resize(224),
                 transforms.CenterCrop(224),

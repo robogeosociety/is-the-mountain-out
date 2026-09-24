@@ -12,6 +12,7 @@ Discord, and a bot restart must not lose an alert.
 """
 
 import argparse
+import hashlib
 import io
 import json
 import subprocess
@@ -31,6 +32,11 @@ from torchvision import transforms
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from collect.frame import crop_burn_in  # noqa: E402
+from collect.freshness import (  # noqa: E402
+    FeedState,
+    update_feed_state,
+)
 from bot.transition import (  # noqa: E402
     DEFAULT_ALERT_MIN_CONFIDENCE,
     DEFAULT_LABEL_COOLDOWN_SECONDS,
@@ -53,11 +59,29 @@ IMAGE_TRANSFORM = transforms.Compose(
 )
 
 
-def fetch_webcam_tensor(url: str, timeout: float = 20.0) -> torch.Tensor:
+def fetch_webcam_bytes(url: str, timeout: float = 20.0) -> bytes:
+    """Raw JPEG bytes, kept separate from decoding so the tick can hash them.
+
+    The hash is what tells a live camera from one that has been returning the
+    same 200 for three hours (collect/freshness.py).
+    """
     resp = requests.get(url, timeout=timeout)
     resp.raise_for_status()
-    img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+    return resp.content
+
+
+def tensor_from_bytes(data: bytes, crop_bottom_px: int = 0) -> torch.Tensor:
+    img = Image.open(io.BytesIO(data)).convert("RGB")
+    # Crop the station's burn-in strip BEFORE Resize, or it gets folded into
+    # the rows above it rather than removed. See collect/frame.py.
+    img = crop_burn_in(img, crop_bottom_px)
     return IMAGE_TRANSFORM(img).unsqueeze(0)
+
+
+def fetch_webcam_tensor(
+    url: str, timeout: float = 20.0, crop_bottom_px: int = 0
+) -> torch.Tensor:
+    return tensor_from_bytes(fetch_webcam_bytes(url, timeout), crop_bottom_px)
 
 
 def fetch_metar(station: str, timeout: float = 10.0) -> tuple[torch.Tensor, dict]:
@@ -112,6 +136,8 @@ def predict(
     station: str,
     storage=None,
     device: str = "mps",
+    crop_bottom_px: int = 0,
+    image_bytes: bytes | None = None,
 ) -> dict:
     # ConvNextLoRAModel downgrades to CPU on its own when MPS is unavailable, so
     # "mps" is safe to ask for on a Linux runner or an Intel Mac.
@@ -120,7 +146,11 @@ def predict(
     )
     model.model_dict.eval()
 
-    image_tensor = fetch_webcam_tensor(webcam_url)
+    # image_bytes lets the caller fetch once and hash before deciding to run
+    # the model at all — a stale feed should cost a GET, not an inference.
+    if image_bytes is None:
+        image_bytes = fetch_webcam_bytes(webcam_url)
+    image_tensor = tensor_from_bytes(image_bytes, crop_bottom_px)
     weather_tensor, weather_readout = fetch_metar(station)
 
     with torch.no_grad():
@@ -132,12 +162,14 @@ def predict(
         "timestamp_utc": datetime.now(timezone.utc)
         .isoformat(timespec="seconds")
         .replace("+00:00", "Z"),
+        "status": "ok",
         "class_index": idx,
         "class_name": CLASS_NAMES[idx],
         "is_out": idx in (1, 2),
         "confidence": {name: probs[i] for i, name in enumerate(CLASS_NAMES)},
         "weather": weather_readout,
         "webcam_url": webcam_url,
+        "frame_sha256": hashlib.sha256(image_bytes).hexdigest(),
         "model_version": git_short_sha(),
     }
 
@@ -150,6 +182,55 @@ def _append_log(log_path: Path, record: dict) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _write_state(out_path: Path, state: dict) -> None:
+    """Publish-safe write: temp file + rename.
+
+    publish.yml may read state.json at any moment, and a half-written one is a
+    broken site.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(state, indent=2) + "\n")
+    tmp_path.replace(out_path)
+
+
+def _stale_state(
+    webcam_url: str,
+    station: str,
+    frame_sha256: str,
+    now: str,
+    feed: FeedState,
+) -> dict:
+    """What the site shows when the camera has stopped sending new frames.
+
+    Deliberately carries no prediction. A frozen frame keeps classifying
+    perfectly well — that is the danger: it would keep reporting "she's out"
+    from a picture taken hours ago. `status` is the field to branch on;
+    `class_name`/`is_out`/`confidence` are null so an old consumer that
+    ignores `status` shows "unknown" rather than a stale answer.
+    """
+    weather_readout = None
+    try:
+        _, weather_readout = fetch_metar(station)
+    except Exception:  # weather is a nicety here; the feed is the story
+        pass
+
+    return {
+        "timestamp_utc": now,
+        "status": "stale",
+        "stale_since": feed.first_seen,
+        "stale_repeat_count": feed.repeat_count,
+        "class_index": None,
+        "class_name": None,
+        "is_out": None,
+        "confidence": None,
+        "weather": weather_readout,
+        "webcam_url": webcam_url,
+        "frame_sha256": frame_sha256,
+        "model_version": git_short_sha(),
+    }
 
 
 def _queue_announcement(
@@ -259,6 +340,20 @@ def main() -> int:
         help="Minimum gap between label requests.",
     )
     parser.add_argument(
+        "--feed-state",
+        default=None,
+        help="Where the frame-freshness bookkeeping persists (defaults to "
+        "feed-state.json beside --out).",
+    )
+    parser.add_argument(
+        "--stale-after-repeats",
+        type=int,
+        default=None,
+        help="Consecutive byte-identical frames before the feed is declared "
+        "stale and no prediction is written (default: [webcam] "
+        "stale_after_repeats in the config).",
+    )
+    parser.add_argument(
         "--capture-key",
         default=None,
         help="Key of the frame this tick captured, relative to the data root; "
@@ -281,20 +376,68 @@ def main() -> int:
     }
 
     exit_code = 0
+    out_path = Path(args.out)
     try:
+        # Fetch first and hash the bytes. A dead feed should cost one GET, not
+        # a model load — and it must not be answered with a prediction.
+        image_bytes = fetch_webcam_bytes(config.webcam_url)
+        frame_sha256 = hashlib.sha256(image_bytes).hexdigest()
+        now = _iso_utc(datetime.now(timezone.utc))
+
+        feed_state_path = (
+            Path(args.feed_state)
+            if args.feed_state
+            else out_path.parent / "feed-state.json"
+        )
+        try:
+            previous_feed = FeedState.from_dict(
+                json.loads(feed_state_path.read_text())
+                if feed_state_path.exists()
+                else None
+            )
+        except OSError, ValueError:
+            previous_feed = FeedState()
+
+        feed, is_stale = update_feed_state(
+            previous_feed,
+            frame_sha256,
+            now,
+            stale_after_repeats=args.stale_after_repeats
+            if args.stale_after_repeats is not None
+            else config.webcam_stale_after_repeats,
+        )
+        feed_state_path.parent.mkdir(parents=True, exist_ok=True)
+        feed_state_path.write_text(json.dumps(feed.to_dict(), indent=2) + "\n")
+        record["feed"] = {**feed.to_dict(), "stale": is_stale}
+
+        if is_stale:
+            # Same bytes N ticks running: the camera is frozen or the CDN is
+            # serving a cached corpse. Say so; do not guess.
+            state = _stale_state(
+                config.webcam_url, config.metar_station, frame_sha256, now, feed
+            )
+            _write_state(out_path, state)
+            print(json.dumps(state, indent=2))
+            print(
+                f"Feed stale: identical frame {feed.repeat_count}x since "
+                f"{feed.first_seen} ({frame_sha256[:12]}). No prediction written.",
+                file=sys.stderr,
+            )
+            record["status"] = "stale"
+            record["state"] = state
+            # No announcement: a stale feed is a pipeline fault, not news about
+            # the mountain, and the alert state machine must not consume it.
+            return exit_code
+
         state = predict(
             checkpoint_dir=checkpoint_dir,
             webcam_url=config.webcam_url,
             station=config.metar_station,
             device=args.device,
+            crop_bottom_px=config.webcam_crop_bottom_px,
+            image_bytes=image_bytes,
         )
-        out_path = Path(args.out)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        # Write via a temp file + rename: the publish workflow may read this
-        # file at any moment, and a half-written state.json is a broken site.
-        tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(state, indent=2) + "\n")
-        tmp_path.replace(out_path)
+        _write_state(out_path, state)
         print(json.dumps(state, indent=2))
         record["status"] = "ok"
         record["state"] = state
