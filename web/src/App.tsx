@@ -13,9 +13,13 @@ interface State {
   timestamp_utc: string | null
   // "ok" = a real prediction. "stale" = the camera has been returning the same
   // bytes for several ticks, so the mini deliberately published no prediction
-  // rather than one from a frozen frame. Optional: older files predate it.
-  status?: 'ok' | 'stale'
+  // rather than one from a frozen frame. "unvalidated" = there is no
+  // checkpoint trained on the current camera, so no prediction was computed at
+  // all. Optional: older files predate the field.
+  status?: 'ok' | 'stale' | 'unvalidated'
   stale_since?: string | null
+  camera_era?: string | null
+  checkpoint_era?: string | null
   class_index: 0 | 1 | 2 | null
   class_name: ClassName | null
   is_out: boolean | null
@@ -133,8 +137,13 @@ function App() {
   // publishing, on time, and is telling us the camera is dead. Say that,
   // rather than implying the site itself is broken.
   const frozen = state?.status === 'stale'
+  // No model for this camera yet. CHECKING... is the truthful face of that:
+  // the pipeline is healthy and collecting labels, it just cannot answer.
+  const unvalidated = state?.status === 'unvalidated'
   const key: ClassName | 'unknown' | 'frozen' = frozen
     ? 'frozen'
+    : unvalidated
+    ? 'unknown'
     : className && !stale
     ? className
     : 'unknown'
@@ -156,6 +165,8 @@ function App() {
                 state?.stale_since ?? timestamp,
                 now
               )}`
+            : unvalidated
+            ? 'training — no checkpoint for this camera yet'
             : stale && timestamp
             ? `stale — last checked ${formatRelative(timestamp, now)}`
             : timestamp
@@ -205,7 +216,17 @@ function DebugPanel({ state }: { state: State }) {
           <div className="opacity-60">ceiling</div>
           <div>{weather?.ceiling_ft != null ? `${weather.ceiling_ft} ft` : 'none'}</div>
           <div className="opacity-60">status</div>
-          <div>{state.status ?? 'ok'}</div>
+          <div>
+            {state.status === 'unvalidated'
+              ? 'no checkpoint for this camera yet'
+              : state.status ?? 'ok'}
+          </div>
+          <div className="opacity-60">era</div>
+          <div>
+            {state.camera_era
+              ? `${state.camera_era} ← ${state.checkpoint_era ?? 'untagged'}`
+              : '—'}
+          </div>
           <div className="opacity-60">frame</div>
           <div>{state.frame_sha256?.slice(0, 12) ?? '—'}</div>
           <div className="opacity-60">model</div>

@@ -25,6 +25,18 @@ class ConfigLoader:
         return self.data["webcam"].get("url", "")
 
     @property
+    def camera_era(self) -> Optional[str]:
+        """Era string the live camera declares, or None to disable the gate."""
+        era = self.data["webcam"].get("era")
+        return era.strip() if isinstance(era, str) and era.strip() else None
+
+    @property
+    def checkpoint_era_fallback(self) -> Optional[str]:
+        """Era to assume for a checkpoint that carries no era.json."""
+        era = self.data["training"].get("checkpoint_era")
+        return era.strip() if isinstance(era, str) and era.strip() else None
+
+    @property
     def webcam_crop_bottom_px(self) -> int:
         """Burn-in strip to drop before the model sees a frame.
 

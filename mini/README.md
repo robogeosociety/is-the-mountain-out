@@ -84,3 +84,8 @@ tail -n 50 ~/Library/Logs/mountain-tick.err.log
   stale after an hour.
 - **Nothing publishes** — `gh auth status`. Dispatch is best-effort; the
   `*/15` schedule in `publish.yml` is the backstop.
+- **The site says CHECKING… and `state.json` has `status: "unvalidated"`** —
+  working as intended: no checkpoint has been trained on the current camera, so
+  no prediction is computed (`train/checkpoint_era.py`). Frames still go to
+  Discord for labeling. It clears itself after the first `just train` on the
+  new camera's labels.

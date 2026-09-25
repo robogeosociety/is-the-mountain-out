@@ -19,6 +19,7 @@ import subprocess
 import sys
 import traceback
 from datetime import datetime, timezone
+from typing import Optional
 from pathlib import Path
 
 import requests
@@ -43,6 +44,10 @@ from bot.transition import (  # noqa: E402
     NotifyState,
     binary_confidence,
     decide_transition,
+)
+from train.checkpoint_era import (  # noqa: E402
+    era_matches,
+    read_checkpoint_era,
 )
 from train.config_loader import ConfigLoader  # noqa: E402
 from train.model import ConvNextLoRAModel  # noqa: E402
@@ -233,6 +238,109 @@ def _stale_state(
     }
 
 
+def _unvalidated_state(
+    webcam_url: str,
+    station: str,
+    frame_sha256: str,
+    now: str,
+    camera_era: str,
+    checkpoint_era: Optional[str],
+) -> dict:
+    """What the site shows while no checkpoint exists for the live camera.
+
+    Same shape as the stale document, and for the same reason: the honest
+    answer is "no answer". The weights from the previous camera would load and
+    produce a confident-looking number about a view they were never fit to, and
+    nothing downstream could tell that apart from a real prediction — so the
+    number is never computed at all.
+    """
+    weather_readout = None
+    try:
+        _, weather_readout = fetch_metar(station)
+    except Exception:  # weather still renders; the model is the missing piece
+        pass
+
+    return {
+        "timestamp_utc": now,
+        "status": "unvalidated",
+        "camera_era": camera_era,
+        "checkpoint_era": checkpoint_era,
+        "class_index": None,
+        "class_name": None,
+        "is_out": None,
+        "confidence": None,
+        "weather": weather_readout,
+        "webcam_url": webcam_url,
+        "frame_sha256": frame_sha256,
+        "model_version": git_short_sha(),
+    }
+
+
+def _queue_label_request(
+    announce_path: Path,
+    notify_state_path: Path,
+    state: dict,
+    capture_key: Optional[str],
+    label_cooldown_hours: float,
+    reason: str,
+) -> str:
+    """Queue a bare "what is this?" post, with no prediction attached.
+
+    The alert state machine is not consulted — there is nothing for it to
+    decide without a model. But the labeling loop has to keep running, because
+    reactions on these posts are the ONLY way a checkpoint for the new camera
+    ever gets trained. So a frame goes out on the ordinary label cooldown,
+    carrying its capture key, and 👍/⛅/👎 on it lands in labels.yaml exactly
+    as before.
+
+    Returns "label" when queued, "quiet" when the cooldown has not elapsed.
+    """
+    now = state["timestamp_utc"]
+    try:
+        stored = (
+            json.loads(notify_state_path.read_text())
+            if notify_state_path.exists()
+            else {}
+        )
+    except OSError, ValueError:
+        stored = {}
+
+    last = stored.get("last_label_request")
+    if last:
+        try:
+            elapsed = (
+                datetime.fromisoformat(now.replace("Z", "+00:00"))
+                - datetime.fromisoformat(last.replace("Z", "+00:00"))
+            ).total_seconds()
+            if elapsed < label_cooldown_hours * 3600:
+                return "quiet"
+        except ValueError:
+            pass
+
+    _append_log(
+        announce_path,
+        {
+            "queued_at": now,
+            "kind": "label",
+            "reason": reason,
+            "is_out": None,
+            "class_name": None,
+            "binary_confidence": None,
+            "capture_key": capture_key,
+            "state": state,
+            "posted": False,
+        },
+    )
+
+    # Only the cooldown field is touched: announced_is_out and the pending flip
+    # belong to the alert machine, which has not run and must not be confused
+    # by an era it knows nothing about.
+    stored["last_label_request"] = now
+    notify_state_path.parent.mkdir(parents=True, exist_ok=True)
+    notify_state_path.write_text(json.dumps(stored, indent=2) + "\n")
+    return "label"
+
+
 def _queue_announcement(
     announce_path: Path,
     notify_state_path: Path,
@@ -340,6 +448,12 @@ def main() -> int:
         help="Minimum gap between label requests.",
     )
     parser.add_argument(
+        "--camera-era",
+        default=None,
+        help="Override [webcam] era. A checkpoint that does not declare this "
+        "era is refused and the site publishes status=unvalidated.",
+    )
+    parser.add_argument(
         "--feed-state",
         default=None,
         help="Where the frame-freshness bookkeeping persists (defaults to "
@@ -409,6 +523,67 @@ def main() -> int:
         feed_state_path.parent.mkdir(parents=True, exist_ok=True)
         feed_state_path.write_text(json.dumps(feed.to_dict(), indent=2) + "\n")
         record["feed"] = {**feed.to_dict(), "stale": is_stale}
+
+        camera_era = args.camera_era or config.camera_era
+        checkpoint_era = read_checkpoint_era(
+            checkpoint_dir, fallback=config.checkpoint_era_fallback
+        )
+        # An unset camera era opts out of the gate entirely; otherwise the
+        # checkpoint has to name the same camera it will be asked about.
+        era_ok = not camera_era or era_matches(camera_era, checkpoint_era)
+        record["era"] = {
+            "camera": camera_era,
+            "checkpoint": checkpoint_era,
+            "match": era_ok,
+        }
+
+        if not era_ok and not is_stale:
+            # No model for this camera. Do not load the old one: it would
+            # produce a confident number about a view it never saw, and
+            # nothing downstream could tell that from a real prediction.
+            state = _unvalidated_state(
+                config.webcam_url,
+                config.metar_station,
+                frame_sha256,
+                now,
+                camera_era,
+                checkpoint_era,
+            )
+            _write_state(out_path, state)
+            print(json.dumps(state, indent=2))
+            print(
+                f"No checkpoint for camera era {camera_era!r} "
+                f"(checkpoint is {checkpoint_era!r}). No prediction written.",
+                file=sys.stderr,
+            )
+            record["status"] = "unvalidated"
+            record["state"] = state
+
+            # The labeling loop keeps running: reactions on these posts are the
+            # only path to a checkpoint that WOULD be valid here.
+            if args.announce:
+                announce_path = Path(args.announce)
+                notify_state_path = (
+                    Path(args.notify_state)
+                    if args.notify_state
+                    else announce_path.parent / "notify-state.json"
+                )
+                try:
+                    record["announced"] = _queue_label_request(
+                        announce_path,
+                        notify_state_path,
+                        state,
+                        args.capture_key,
+                        args.label_cooldown_hours,
+                        reason="unvalidated",
+                    )
+                except Exception as exc:
+                    record["announced"] = "error"
+                    print(
+                        f"Label queue failed: {type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
+            return exit_code
 
         if is_stale:
             # Same bytes N ticks running: the camera is frozen or the CDN is

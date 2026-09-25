@@ -26,8 +26,22 @@
 >   this box applies again. Re-verify the framing monthly — `WEBCAMS.md` has
 >   the check.
 >
-> Until there are enough Queen Anne labels to train on, the site is best read
-> as "the pipeline is alive", not "the model is right".
+> **Until a Queen Anne checkpoint exists, the site publishes no prediction at
+> all.** This is enforced, not a convention: `[webcam] era` names the live
+> camera, each checkpoint records its own era in `era.json` beside the weights
+> (written on every save), and `tools/predict_state.py` refuses to load a
+> checkpoint whose era does not match — it writes `status: "unvalidated"` with
+> null `class_name`/`is_out`/`confidence`, the page shows CHECKING…, and the
+> alert state machine is never consulted, so nothing is announced.
+>
+> **The labeling loop keeps running.** A frame is still queued to Discord on
+> the ordinary label cooldown (`--label-cooldown-hours`, 4 h), carrying its
+> capture key, so 👍/⛅/👎 reactions accumulate against real frames the whole
+> time. That is the only route back to a working model.
+>
+> The gate clears itself: the first `just train` on Queen Anne labels stamps
+> `era.json` with `king5-queenanne`, the eras match, and predictions resume on
+> the next tick with no config change and no deploy.
 
 This project shares a *harness* convention for LoRA training with the qwenbot/RAG
 projects (`tommybot`). It is **not** a shared training library — the two trainers
@@ -105,6 +119,11 @@ cd /Volumes/dev/mountain/data
 mv labels.yaml labels.uw-atg.yaml     # keep it: it is the UW era's record
 : > labels.yaml                        # start empty; the bot appends to this
 ```
+
+There is no need to delete or retag the UW **checkpoint**: the era gate already
+refuses it (`train/checkpoint_era.py`), and keeping it costs nothing. Do not
+hand-write an `era.json` naming the live camera to "unblock" the site — that
+turns the gate off and puts UW-era guesses back on the page.
 
 Keep the UW captures too — they cost little and they are the only evidence for
 the pre-cut numbers in `CHECKPOINTS.md`. Just do not train on them.

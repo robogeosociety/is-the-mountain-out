@@ -94,7 +94,19 @@ Two consequences an agent must not paper over:
   without warning, and Rainier sits near the left edge of the center crop —
   `WEBCAMS.md` has the framing check; run it when predictions go strange.
 
-Two mechanisms exist because of this camera:
+Three mechanisms exist because of this camera:
+
+- **`train/checkpoint_era.py` — the era gate.** `[webcam] era` names the live
+  camera; every checkpoint records its own era in `era.json` beside the weights
+  (stamped by `Trainer._save_checkpoint` on every save), falling back to
+  `[training] checkpoint_era` for anything trained before the marker existed.
+  On a mismatch `predict_state.py` **does not load the model at all** and
+  publishes `status: "unvalidated"` with null prediction fields; the SPA shows
+  CHECKING…, and the alert state machine is never consulted. The labeling loop
+  still runs — a frame is queued to `announce.jsonl` as a bare `kind: "label"`
+  (`reason: "unvalidated"`) on the usual cooldown, so reactions keep
+  accumulating. **Do not hand-write an `era.json` to silence this**; the gate
+  clears itself when a checkpoint is trained on the live camera.
 
 - **`collect/frame.py` — the burn-in crop.** KING 5 burns a clock into the
   bottom ~25 px; it changes every frame and is the highest-contrast thing in

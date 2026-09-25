@@ -18,9 +18,17 @@ Append `?debug` to see confidence bars and the raw METAR readout.
 > webcam 404'd for good on ~2026-09-15 and is gone from their server listing;
 > the feed is now the **KING 5 Queen Anne tower camera** (`WEBCAMS.md`).
 > Different view, so **the existing checkpoint is invalid for this framing and
-> the labels restart from zero** — the site is currently evidence that the
-> pipeline is alive, not that the answer is right. Details, and what it takes
-> to get back to a real model: `TRAINING.md` and `CHECKPOINTS.md`.
+> the labels restart from zero**.
+>
+> **The site does not guess in the meantime.** `[webcam] era` names the live
+> camera and every checkpoint records the era it was trained under
+> (`train/checkpoint_era.py`); when they disagree the old weights are **never
+> loaded**, `state.json` carries `status: "unvalidated"` with no prediction,
+> and the page shows **CHECKING…**. No Discord alerts fire either. What *does*
+> keep running is the labeling loop — a frame still goes to the channel on the
+> usual cooldown so 👍/⛅/👎 reactions accumulate, which is the only route to a
+> checkpoint that would be valid here. Details: `TRAINING.md` and
+> `CHECKPOINTS.md`.
 
 ![Mount Rainier Topo Map](assets/map.png)
 *Mount Rainier, the webcam (north-northwest) and the KSEA METAR station. The
@@ -179,11 +187,12 @@ sequenceDiagram
 
 ## Current model state
 
-**Nothing is trained on the live camera yet.** The table below describes the
-last UW-era checkpoint — the file the tick still loads from
-`/Volumes/dev/mountain/checkpoints/` (it was R2 `checkpoints/` until 2026-09).
-It is a record of what was, not a claim about what the site is currently
-saying; see the caution at the top.
+**Nothing is trained on the live camera yet, and the site says so** —
+`status: "unvalidated"`, rendered as CHECKING…, until a Queen Anne checkpoint
+exists. The table below describes the last UW-era checkpoint, which still sits
+in `/Volumes/dev/mountain/checkpoints/` (it was R2 `checkpoints/` until
+2026-09) but is **no longer loaded**: the era gate refuses it. It is a record
+of what was, not a claim about what the site is saying.
 
 | Field | Value |
 |---|---|
@@ -305,8 +314,11 @@ Single source of truth: `mountain.toml`.
   inference (`collect/frame.py`); `stale_after_repeats` is how many
   byte-identical frames in a row mean the feed is dead
   (`collect/freshness.py`) — at which point `state.json` carries
-  `status: "stale"` and **no prediction** rather than reading a frozen picture
-- `[training]` — schedule, gradient accumulation, LoRA hyperparams
+  `status: "stale"` and **no prediction** rather than reading a frozen picture.
+  `[webcam] era` is the camera identity the era gate keys on
+- `[training]` — schedule, gradient accumulation, LoRA hyperparams, and
+  `checkpoint_era`: the era assumed for a checkpoint with no `era.json` beside
+  it (everything trained before 2026-09-24 is `uw-atg` by definition)
 - `[collection]` — capture cadence
 - `[storage]` — `backend = "local"`; the dev disk is the store
 - `[bot]` — sweep window, state URL, announce-queue path

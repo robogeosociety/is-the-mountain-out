@@ -1,7 +1,7 @@
 import os
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
@@ -9,6 +9,7 @@ import typer
 from torch import optim
 
 from collect.frame import CropBurnIn
+from train.checkpoint_era import ERA_FILENAME, write_checkpoint_era
 from train.config_loader import ConfigLoader
 from train.metrics import compute_metrics, summary_line
 from train.model import ConvNextLoRAModel
@@ -115,6 +116,34 @@ class Trainer:
         )
         self.weather_fetcher = WeatherFetcher(self.config_loader.metar_station)
 
+    def _save_checkpoint(self, storage=None) -> list[str]:
+        """Save the weights and stamp them with the camera era they were fit to.
+
+        The stamp is what lets inference refuse a checkpoint trained on a
+        camera that no longer exists (train/checkpoint_era.py). It is written
+        on every save so a checkpoint is never ambiguous about its provenance.
+        """
+        checkpoint_dir = self.config_loader.checkpoint_dir
+        uploaded = self.model_wrapper.save_checkpoint(checkpoint_dir, storage=storage)
+        era = self.config_loader.camera_era
+        if isinstance(era, str) and era:
+            try:
+                write_checkpoint_era(
+                    checkpoint_dir,
+                    era,
+                    webcam_url=self.config_loader.webcam_url,
+                    saved_at=datetime.now(timezone.utc)
+                    .isoformat(timespec="seconds")
+                    .replace("+00:00", "Z"),
+                )
+            except Exception as exc:
+                # Fail-safe, not fail-open: an unstamped checkpoint falls back
+                # to [training] checkpoint_era and is REFUSED by inference, so
+                # the worst case is a site that says CHECKING... not one that
+                # publishes predictions from an unknown model.
+                print(f"  ! could not stamp {ERA_FILENAME}: {exc}")
+        return uploaded
+
     def run_single_cycle(self, label: int = 1):
         print(f"[{datetime.now()}] Starting single training cycle...")
         weather_vector = self.weather_fetcher.get_weather_vector()
@@ -137,7 +166,7 @@ class Trainer:
                     image_batch, weather_batch, label_batch, self.optimizer
                 )
                 print(f"[{datetime.now()}] Cycle Complete: Loss = {loss:.4f}")
-                self.model_wrapper.save_checkpoint(self.config_loader.checkpoint_dir)
+                self._save_checkpoint()
             else:
                 print(f"  Source {source}: Capture failed.")
         finally:
@@ -186,9 +215,7 @@ class Trainer:
                         print(
                             f"[{datetime.now()}] Batch Training Complete: Loss = {loss:.4f}"
                         )
-                        self.model_wrapper.save_checkpoint(
-                            self.config_loader.checkpoint_dir
-                        )
+                        self._save_checkpoint()
                         image_list, weather_list, label_list = [], [], []
 
                 time.sleep(self.config_loader.capture_interval_seconds)
@@ -748,9 +775,7 @@ def batch(
                 best_epoch = epoch + 1
                 best_val_acc = val_acc
                 best_val_metrics = val_metrics
-                uploaded_keys = trainer.model_wrapper.save_checkpoint(
-                    trainer.config_loader.checkpoint_dir, storage=storage
-                )
+                uploaded_keys = trainer._save_checkpoint(storage=storage)
                 record["checkpoint_saved"] = True
                 record["previous_best_val_loss"] = previous_best
                 record["checkpoint_keys"] = list(uploaded_keys)

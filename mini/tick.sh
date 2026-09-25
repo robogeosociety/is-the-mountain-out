@@ -124,7 +124,10 @@ if ! uv run python tools/predict_state.py "${predict_args[@]}" >/dev/null; then
     # state.json buys nothing, so stop here.
     die "inference failed — see $LIVE_DIR/history.jsonl"
 fi
-log "inference ok — $(/usr/bin/python3 -c 'import json,sys;s=json.load(open(sys.argv[1]));print(s["class_name"], s["timestamp_utc"])' "$LIVE_DIR/state.json" 2>/dev/null || echo 'state.json written')"
+# Report the status, not just the class: "unvalidated" (no checkpoint for this
+# camera) and "stale" (frozen feed) are successful ticks that deliberately
+# publish no prediction, and a log line saying "None" would read like a fault.
+log "inference ok — $(/usr/bin/python3 -c 'import json,sys;s=json.load(open(sys.argv[1]));print(s.get("status","ok"), s.get("class_name") or "-", s["timestamp_utc"])' "$LIVE_DIR/state.json" 2>/dev/null || echo 'state.json written')"
 
 # --- 5. publish -----------------------------------------------------------
 if [ "${MOUNTAIN_SKIP_PUBLISH:-0}" = "1" ]; then
