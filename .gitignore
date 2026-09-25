@@ -239,20 +239,17 @@ terraform/r2_credentials.env
 node_modules/
 web/dist/
 
-# Cloudflare Worker build artifacts
-worker/node_modules/
-worker/dist/
-worker/.wrangler/
-web/.wrangler/
+# Local dev copies of the live files (publish.yml supplies the real ones)
+web/public/state.json
+web/public/history.jsonl
 
 # Local runner secrets
 local-runner/.env
 
-# Live checkpoint weights are NOT tracked — R2 `checkpoints/` is the source of
-# truth (the weekly scheduled run rewrites these on the mini; committing them
-# caused pull conflicts and stale-weights drift). `load_checkpoint` pulls from
-# R2 when the local copy is missing. Archived checkpoints_v1_binary/ etc. stay
-# tracked as history.
+# Live checkpoint weights are NOT tracked — /Volumes/dev/mountain/checkpoints/
+# on the mini is the source of truth (the scheduled run rewrites them there;
+# committing them caused pull conflicts and stale-weights drift), and restic
+# backs it up. Archived checkpoints_v1_binary/ etc. stay tracked as history.
 train/checkpoints/adapter_config.json
 train/checkpoints/adapter_model.safetensors
 train/checkpoints/classifier.pt

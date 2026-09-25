@@ -6,13 +6,38 @@ latitude = 46.8523
 longitude = -121.7603
 
 [webcam]
-name = "UW ATG Webcam 2"
-url = "https://atmos.uw.edu/data/images/webcam2_latest.jpg"
-description = "UW ATG building 7th floor webcam pointing southeast toward Mount Rainier"
-latitude = 47.6533
-longitude = -122.3091
+# KING 5 Queen Anne Tower Camera, primary since 2026-09-24. The UW ATG webcam2
+# feed (atmos.uw.edu/data/images/webcam2_latest.jpg) has 404'd since ~2026-09-15
+# and is gone from UW's server listing — see WEBCAMS.md.
+#
+# This is a PTZ broadcast camera on someone else's CDN, not a fixed research
+# cam: the pointing can drift, so re-verify the framing periodically
+# (WEBCAMS.md has the check). Rainier sits above and just left of the downtown
+# towers, roughly 80x45 px in the 1920x1080 frame — small, but inside the
+# center 224 crop the model sees.
+# The era a checkpoint must declare to be considered valid for this camera.
+# Change the camera, change this string: every checkpoint trained on the old
+# view is then correctly refused (train/checkpoint_era.py) and the site says
+# CHECKING... instead of guessing. Unset it to disable the gate entirely.
+era = "king5-queenanne"
+name = "KING 5 Queen Anne Tower Camera"
+url = "https://cdn.tegna-media.com/king/weather/queenanne.jpg"
+description = "KING 5 tower camera on Queen Anne hill near Kerry Park, looking southeast over downtown Seattle toward Mount Rainier (bearing ~152 deg, 96 km). Plain still JPEG, 1920x1080, refreshes about every 4 minutes."
+latitude = 47.629
+longitude = -122.360
+# Bottom strip the station burns its clock + branding into. Cropped at load
+# time by collect/frame.py, before any resize — never at capture time, so the
+# archive keeps the raw frame.
+crop_bottom_px = 25
+# Consecutive ticks returning byte-identical frames before the feed is called
+# dead and state.json says `status: "stale"` instead of guessing (the feed
+# refreshes ~4x faster than the 15-minute tick, so 3 is already generous).
+stale_after_repeats = 3
 
 [weather]
+# Still KSEA: the view moved across Seattle (UW campus -> Queen Anne), not out
+# of the airport's airmass. Visibility/ceiling at SeaTac remain the right
+# weather features for this sightline.
 station_id = "KSEA"
 description = "Seattle-Tacoma International Airport"
 latitude = 47.4502
@@ -23,6 +48,11 @@ schedule_seconds = 1800 # 30 minutes for training service
 capture_interval_seconds = 300 # 5 minutes between captures in 'live' loop
 gradient_accumulation_steps = 4 # Train after 4 captures
 checkpoint_dir = "train/checkpoints"
+# Era assumed for a checkpoint with no era.json beside it. Everything trained
+# before 2026-09-24 predates the marker and belongs to the dead UW camera, so
+# an untagged checkpoint is UW-era by definition. New runs stamp era.json
+# themselves and ignore this.
+checkpoint_era = "uw-atg"
 scheduled_epochs = 5 # epochs per supervisor-scheduled weekly run (train/scheduled.py)
 
 [training.lora]
@@ -36,15 +66,23 @@ collection_seconds = 600 # 10 minutes for collection service (interval-based)
 # schedule = { Minute = 0 } # Optional: Run every hour on the hour (calendar-based)
 
 [storage]
-backend = "r2"
-r2_account_id = "d7adee58513c1b2f770ccaac90cf114f"
-r2_bucket = "is-the-mountain-out"
+# Local since 2026-09: captures, labels and checkpoints live on the Mac mini's
+# dev disk (/Volumes/dev/mountain/), pulled out of R2 once by mini/r2-pull.sh.
+# The R2 backend still exists in collect/storage.py — set backend = "r2" plus
+# r2_account_id/r2_bucket to use it — but nothing in the live path does.
+backend = "local"
 cache_dir = ".r2cache"
 
 [bot]
 # Discord reaction-labeling bot (BOT.md). Secrets + channel/user ids live in
-# cf.env; this section is behavior tuning only. The bot never posts on a
-# schedule — the Worker's visibility-change notifications are the labeling
-# surface — so there is no posting interval or daylight window to tune.
+# cf.env (gitignored; DISCORD_BOT_TOKEN, DISCORD_CHANNEL_ID,
+# DISCORD_ALLOWED_USER_IDS). This section is behavior tuning only. The bot never
+# posts on a schedule — visibility changes are the labeling surface — so there
+# is no posting interval or daylight window to tune.
 sweep_hours = 72 # startup sweep re-reads this much channel history for missed reactions
-state_url = "https://pub-66d3d1f139004e29b2afcb5fba49bdb3.r2.dev/state.json" # public bucket; `bot post-once` shows the model's live prediction
+# `bot post-once` shows the model's live prediction. Served by GitHub Pages now;
+# the mini can also read /Volumes/dev/mountain/live/state.json directly.
+state_url = "https://mountainisout.robogeosociety.xyz/state.json"
+# Announcements the 15-minute tick has queued for the bot to post
+# (tools/predict_state.py --announce). One JSON object per line.
+announce_queue = "/Volumes/dev/mountain/live/announce.jsonl"

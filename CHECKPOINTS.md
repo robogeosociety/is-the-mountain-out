@@ -2,7 +2,37 @@
 
 This document catalogs the major model checkpoints saved during the project's development and outlines expectations for future models.
 
-## Current Checkpoints
+> [!CAUTION]
+> **Camera cut, 2026-09-24 — everything below is the UW ATG era.** The UW
+> webcam died and the pipeline moved to the KING 5 Queen Anne tower camera
+> (`WEBCAMS.md`). **Every checkpoint in this file is invalid for the new
+> framing.** They load, they run, they emit confident probabilities — from a
+> feature distribution that no longer exists. There is currently **no valid
+> checkpoint for the live camera**, and the labels start from zero
+> (`TRAINING.md` → *Labels at the camera cut*).
+>
+> Metrics across the cut are not comparable: view, focal length, target size,
+> sky/city ratio and class balance all changed together. The first Queen Anne
+> checkpoint opens a new section below and starts its own baseline — do not
+> quote it against the 97.6% / macro-F1 numbers from the UW era.
+>
+> If the Queen Anne camera is ever repointed (it is a PTZ broadcast camera),
+> this same caution applies again to whatever was trained before the move.
+
+## Era 2: KING 5 Queen Anne (2026-09-24 →)
+
+### 6. *(none yet)*
+- **Status:** **No checkpoint trained on this camera.** The tick runs and the
+  site publishes, but predictions are the old model's guesses on a view it was
+  never fit to — treat them as noise. Collect Queen Anne labels via the
+  Discord reaction labeler (`BOT.md`), then `just train`.
+- **Baseline to beat:** none. The first run sets it. Report macro-F1, balanced
+  accuracy and the visible-class precision (`train/metrics.py`) as usual.
+
+## Era 1: UW ATG webcam 2 (2026-02 → 2026-09) — historical
+
+All checkpoints below were trained on UW ATG webcam 2 frames. Kept for the
+record and for the reasoning; none of them is a valid model for the live site.
 
 ### 1. `checkpoints_v1_binary`
 - **Date:** March 11, 2026
@@ -26,11 +56,16 @@ This document catalogs the major model checkpoints saved during the project's de
 - **Strategy:** Fresh ConvNeXt weights fine-tuned with 78x oversampling on "Full" and 11x on "Partial".
 - **Status:** Superseded by the scheduled-run era (below).
 
-### 4. R2 `checkpoints/` (Live — scheduled-run era, 2026-07-26 →)
-- **Weights left git on 2026-07-26.** The live checkpoint is the R2
-  `checkpoints/` object set, rewritten by the weekly supervisor-scheduled
-  retrain (`TRAINING.md`); `train/checkpoints/` is an untracked local working
-  copy, and `load_checkpoint` pulls from R2 when it's missing. Committing the
+### 4. Dev-disk `checkpoints/` (scheduled-run era, 2026-07-26 → 2026-09-24)
+- **Status:** last UW-era checkpoint, and the file the tick still loads today —
+  invalid for the Queen Anne framing (see the caution at the top).
+- **Weights left git on 2026-07-26.** The live checkpoint was the R2
+  `checkpoints/` object set until 2026-09; it is now
+  `/Volumes/dev/mountain/checkpoints/` on the mini (pulled out of R2 once by
+  `mini/r2-pull.sh`, backed up nightly by restic), rewritten by the weekly
+  supervisor-scheduled retrain (`TRAINING.md`) and loaded directly by the
+  15-minute tick. `train/checkpoints/` is an untracked local working
+  copy. Committing the
   binaries had two failure modes: the mini's checkout went permanently dirty
   after every scheduled run, and the committed copy silently drifted stale
   behind the model actually serving.

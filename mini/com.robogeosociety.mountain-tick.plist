@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Mountain tick — capture + native inference + publish, every 15 minutes.
+
+  install.sh renders __HOME__ (a plist cannot expand $HOME) and copies this to
+  ~/Library/LaunchAgents/. Read mini/README.md before editing.
+
+  Two deliberate choices:
+
+  * ProgramArguments points at ~/.local/libexec, NOT at the copy on /Volumes/dev.
+    launchd exec's this path every 15 minutes; if it lived on the dev disk, a
+    wedged disk would hang the exec itself and the job's own bounded probe would
+    never get to run. install.sh copies the script onto the boot disk for this.
+  * StartInterval, not StartCalendarInterval: ticks are "every 15 minutes", not
+    "at :00/:15/:30/:45", and a missed wall-clock slot must not queue a burst.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.robogeosociety.mountain-tick</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__HOME__/.local/libexec/mountain-tick.sh</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>WorkingDirectory</key>
+    <string>__HOME__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__HOME__/.local/bin:__HOME__/.pixi/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>__HOME__</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/mountain-tick.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/mountain-tick.err.log</string>
+
+    <!-- An 8 GB mini runs this alongside a Discord bot and a transit daemon.
+         Inference is not interactive; let it yield. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>5</integer>
+
+    <!-- If a tick somehow outlives its interval, launchd SIGTERMs it and the
+         script's own lock keeps the next one from piling on. -->
+    <key>ExitTimeOut</key>
+    <integer>600</integer>
+    <key>AbandonProcessGroup</key>
+    <false/>
+</dict>
+</plist>
