@@ -36,7 +36,12 @@ uv run --group bot bot post-once     # one labelable post, then exit (setup chec
 just tick                   # probe + capture + native inference + publish
 just tick-local             # the same, without dispatching the Pages deploy
 just publish                # gh workflow run publish.yml
-just install-agent          # (re)install the LaunchAgent — GUI session only
+just install-daemon         # (re)install the LaunchDaemon — at the mini's console
+
+# Training — AIR ONLY (the 8 GB mini never trains; see TRAINING.md)
+just pull-labels            # rsync the mini's labels + the frames they name
+just train                  # training batch on MPS, era.json stamped on save
+just push-checkpoint        # rsync back to the mini + kickstart the tick
 ```
 
 ### Frontend (ui/)
@@ -77,7 +82,7 @@ FastAPI server writes its port to `data/classifier_server.port` at startup (dyna
 
 ### Discord labeling bot (`bot/`)
 
-Gateway bot (discord.py, `bot` dependency group) that records 👍/⛅/👎 reactions as Full/Partial/Not-Out labels — the mobile counterpart to the classifier UI. **It does not post on a schedule**: visibility-change notifications are the labeling surface. The mini's tick queues them to `/Volumes/dev/mountain/live/announce.jsonl` and the bot posts them *as itself* (until 2026-09 the Cloudflare Worker posted them using this bot's token, for the same reason). That is load-bearing — without the privileged Message Content intent Discord blanks the embeds of any other author's messages, so while notifications came from a webhook the capture-key footer was unreadable and every reaction on one was silently dropped. `bot/labeler.py` is pure logic (emoji normalization, capture-key footers, union-merge into the shared `labels.yaml`); `bot/main.py` is the discord.py wiring (`on_raw_reaction_add`, startup sweep of missed reactions, and `post-once` as a manual setup check). See `BOT.md`.
+Gateway bot (discord.py, `bot` dependency group) that records 👍/⛅/👎 reactions as Full/Partial/Not-Out labels — the mobile counterpart to the classifier UI. **It does not post on a schedule**: visibility-change notifications are the labeling surface. The mini's tick queues them to `/Users/tommydoerr/mountain/live/announce.jsonl` and the bot posts them *as itself* (until 2026-09 the Cloudflare Worker posted them using this bot's token, for the same reason). That is load-bearing — without the privileged Message Content intent Discord blanks the embeds of any other author's messages, so while notifications came from a webhook the capture-key footer was unreadable and every reaction on one was silently dropped. `bot/labeler.py` is pure logic (emoji normalization, capture-key footers, union-merge into the shared `labels.yaml`); `bot/main.py` is the discord.py wiring (`on_raw_reaction_add`, startup sweep of missed reactions, and `post-once` as a manual setup check). See `BOT.md`.
 
 ### The camera, and why the model is currently wrong
 
@@ -134,11 +139,16 @@ cron Worker calling a Container, writing state to R2, a second Worker serving
 the SPA) had been failing since 2026-09-15 and was the only thing forcing the
 Workers Paid plan.
 
-**The tick (`mini/`).** `com.robogeosociety.mountain-tick.plist` runs
-`mini/tick.sh` every 900s on the mini. It (1) bounded-probes `/Volumes/dev` in a
-child process and exits if the probe does not return within 5s, (2) runs
-`collect capture-once`, (3) runs `tools/predict_state.py` natively on MPS with a
-checkpoint from `/Volumes/dev/mountain/checkpoints`, writing
+**The tick (`mini/`).** `mini/launchd/com.robogeosociety.mountain-tick.plist`
+— a **system LaunchDaemon** since 2026-09-27, because the mini's only remote
+reboot (`sudo fdesetup authrestart`) leaves no user session and LaunchAgents do
+not run at the login window — runs `mini/tick.sh` every 900s as
+`tommydoerr:staff`. It (1) bounded-probes `/Volumes/dev` in a child process and
+exits if the probe does not return within 5s (only when a configured path is
+still under it), (2) runs `collect capture-once`, (3) runs
+`tools/predict_state.py` natively on MPS with a checkpoint from
+`$MOUNTAIN_ROOT/checkpoints` (`/Users/tommydoerr/mountain`, on the boot
+volume), writing
 `live/state.json` (temp file + rename) and appending `live/history.jsonl`, and
 (4) fires `gh workflow run publish.yml`. Read `mini/README.md` before touching
 any of it.
@@ -151,10 +161,14 @@ Three things about that script are load-bearing:
   here does not fail the tick, it silences the site permanently. The probe runs
   in a child, the parent kills it at the deadline, and the parent never touches
   the path itself.
-- **`install.sh` copies the script to `~/.local/libexec`.** launchd exec's the
-  path in `ProgramArguments`; if that path were on the dev disk, a wedge would
-  hang the exec before the script's own probe could run. Re-run `install.sh`
-  after editing `tick.sh` — the agent runs the copy.
+- **`install.sh` copies the script to `/usr/local/libexec`** (root:wheel, boot
+  volume). launchd exec's the path in `ProgramArguments`; if that path were on
+  the dev disk, a wedge would hang the exec before the script's own probe could
+  run. Re-run `install.sh` after editing `tick.sh` — the daemon runs the copy.
+- **A daemon has no inherited environment.** `HOME`, `PATH` and every
+  `MOUNTAIN_*` root are written out in the plist, including
+  `MOUNTAIN_LOCK_DIR=/tmp/mountain-tick.lock` (a daemon gets no per-user
+  `$TMPDIR`, and two different lock paths would mean two concurrent ticks).
 - **Discord is never called from the tick.** Announcements are *queued* to
   `live/announce.jsonl` (`--announce`), and the single Discord bot drains them.
   A chat API must not be able to stall a 15-minute job, and a bot restart must
@@ -163,7 +177,7 @@ Three things about that script are load-bearing:
 **The publish (`.github/workflows/publish.yml`).** `workflow_dispatch` (the
 normal path, fired by the tick) plus a `*/15` schedule as a backstop.
 `runs-on: [self-hosted, macOS, fleet]` because the job reads
-`/Volumes/dev/mountain/live` off the runner host; `concurrency: pages`. It
+`/Users/tommydoerr/mountain/live` off the runner host; `concurrency: pages`. It
 builds `web/`, copies `state.json` + a bounded tail of `history.jsonl` into
 `web/dist`, writes `CNAME` (`mountainisout.robogeosociety.xyz`) and
 `.nojekyll` into the artifact, then `configure-pages` +

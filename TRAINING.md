@@ -40,8 +40,99 @@
 > time. That is the only route back to a working model.
 >
 > The gate clears itself: the first `just train` on Queen Anne labels stamps
-> `era.json` with `king5-queenanne`, the eras match, and predictions resume on
-> the next tick with no config change and no deploy.
+> `era.json` with `king5-queenanne`; `just push-checkpoint` puts it on the
+> mini, the eras match, and predictions resume on the next tick with no config
+> change and no deploy.
+
+## Training is Air-only
+
+**The mini is 8 GB and must never train.** Decided 2026-07-04, restated in
+`docs/consolidation-plan-2026-09.md` (2026-09-27) after the machine spent
+fourteen days wedged: it has to hold an always-on Discord bot, the transit
+tracker's WebSocket, the 15-minute inference tick and a GitHub runner in that
+memory, and a ConvNeXt fine-tune with oversampled minority classes is the one
+workload that reliably pushes it into swap. Inference is a forward pass every
+900 seconds and costs it nothing. Training is a different shape and belongs on
+the M4 Air, which is plugged in, has the RAM, and is the machine Tommy is
+sitting at when he wants to watch a val loss move.
+
+The split is therefore: **the mini writes labels, the Air writes checkpoints.**
+
+```
+mini (always on)                          Air (on demand)
+────────────────                          ───────────────
+Discord bot writes labels.yaml
+captures accumulate in data/
+                          ──►  just pull-labels   rsync over tommys-mac-mini.local
+                                                  labels + only the referenced frames
+                               just train         ConvNeXt + LoRA on MPS
+                                                  best-val checkpoint, era.json stamped
+                          ◄──  just push-checkpoint
+tick loads the new weights                        rsync back + kickstart the daemon
+status flips unvalidated → ok
+```
+
+### The loop, concretely
+
+```sh
+just pull-labels        # air/pull-labels.sh  — mini → Air
+just train              # 5 epochs on ~/mountain/data/labels.yaml
+just push-checkpoint    # air/push-checkpoint.sh — Air → mini, then kickstart
+```
+
+1. **Pull.** `air/pull-labels.sh` rsyncs `labels.yaml` and the `labels/`
+   provenance log whole, then builds a manifest of exactly the captures those
+   labels reference (plus each one's METAR) and pulls only those. The archive
+   is thousands of frames; the labeled subset is the only part a run reads.
+   `--all` mirrors everything if you want it.
+2. **Train.** Unchanged — `training batch` on MPS. `just train` with no
+   arguments resolves the labels path from `[paths] labels_dir`, so the
+   command does not encode a machine.
+3. **Push.** `air/push-checkpoint.sh` refuses to ship a checkpoint whose
+   `era.json` does not match `[webcam] era` — a mis-stamped checkpoint does
+   not produce a wrong answer, it produces a site stuck at CHECKING… with
+   nothing in the logs explaining why, which is worse. The previous weights
+   are kept in `checkpoints/.previous` on the mini. Then it kickstarts
+   `system/com.robogeosociety.mountain-tick` so the next `state.json` is
+   already the new model; without passwordless sudo on the mini it warns and
+   lets the 15-minute interval do it.
+4. **The gate clears itself.** `tools/predict_state.py` compares the loaded
+   checkpoint's era to the live camera's on every tick. The first Queen Anne
+   checkpoint makes them match, `status` goes from `"unvalidated"` to `"ok"`,
+   the page stops saying CHECKING… and alerts resume. No config change, no
+   deploy, no restart.
+
+**Always `.local`, never the tailnet.** `[mini] host` is
+`tommydoerr@tommys-mac-mini.local` and both scripts abort on a `*.ts.net`
+address. Tailscale is not a dependency of this fleet; a training pull that
+needs a re-auth nobody is watching is a pull that fails at the worst time.
+
+### The label layout the Air expects
+
+The mini is the only label **writer** — one Discord bot, reacting to 👍/⛅/👎
+(`BOT.md`) — so this side is a one-way mirror. Do not hand-edit labels on the
+Air; the next pull overwrites them.
+
+| Path (relative to `[paths] labels_dir` / `captures_dir`) | Written by | Shape |
+| --- | --- | --- |
+| `labels.yaml` | bot, classifier UI | YAML map, `"<capture key>": 0\|1\|2` — 0 Not Out, 1 Full, 2 Partial. Union-merged on every write, never pruned |
+| `labels/discord-events.jsonl` | bot | append-only provenance, one object per reaction: `timestamp`, `capture`, `label`, `class`, `user_id`, `source` |
+| `labels/train-watermark.json` | scheduled runs | `best_val_loss`, `best_macro_f1`, and how far the events log has been consumed |
+| `YYYYMMDD/HHMMSS_ffffff_UTC/images/<name>.jpg` | `collect capture-once` | the raw frame — **uncropped**; the burn-in strip comes off at load time |
+| `YYYYMMDD/HHMMSS_ffffff_UTC/metar/metar.txt` | `collect capture-once` | the METAR row for that capture |
+
+A **capture key** is the image path exactly as it appears above
+(`20260927/101530_123456_UTC/images/frame.jpg`) — it is the key in
+`labels.yaml`, the `capture_key` in `announce.jsonl`, and what
+`pull-labels.sh` turns into an rsync manifest. `labels_dir` and `captures_dir`
+are the same directory today, which is why `LocalStorage(data_root)` resolves
+both; they are named separately because one is kilobytes pulled whole and the
+other is gigabytes pulled selectively.
+
+A label whose capture is missing is **not** an error: the trainer resolves
+each key through the storage backend and `continue`s when the image or the
+METAR is absent. That is what makes a selective pull safe, and what makes the
+UW-era labels harmless rather than fatal.
 
 This project shares a *harness* convention for LoRA training with the qwenbot/RAG
 projects (`tommybot`). It is **not** a shared training library — the two trainers
@@ -62,13 +153,16 @@ the mountain-specific instance.
    ```
 
    Labels arrive from two surfaces that share one `labels.yaml` (union-merged,
-   the dev disk as source of truth): the bulk classifier UI (`uv run classify start`) and
+   the mini as source of truth): the bulk classifier UI (`uv run classify start`) and
    the Discord reaction-labeling bot (👍/⛅/👎 on the tick's alerts and
    label requests — see `BOT.md`). A batch run picks both up with no extra flags.
 
-   **Scheduled runs:** the robogeosociety/supervisor fires
+   **Scheduled runs (historical):** the robogeosociety/supervisor fired
    `scripts/scheduled-train.sh` (→ `python -m train.scheduled`) on the mini
-   every Monday 04:00 — but only *trains* when `labels/discord-events.jsonl`
+   every Monday 04:00. The supervisor's mini agents were retired in the
+   2026-09 consolidation and training moved to the Air, so nothing runs this
+   on a schedule today; the code and its telemetry are kept because a weekly
+   run from the Air is the obvious next step. It only *trained* when `labels/discord-events.jsonl`
    has events newer than the R2 watermark (`labels/train-watermark.json`);
    idle weeks exit in seconds. Runs post start/finish telemetry to #mountain
    (best-val-loss delta included; a failed run keeps the watermark so next
@@ -78,20 +172,18 @@ the mountain-specific instance.
 
    (the `training` console script → `train.scheduler:app`.)
 
-2. **Training runs locally on the most capable machine, on demand.** It
-   prefetches the dataset from R2 and runs gradient descent on MPS — RAM-heavy and
-   worth watching the per-epoch val loss for — so run it interactively on the best
-   hardware available, not pinned to the weak always-on node. **Scheduling here is
-   reserved for the always-on collector service** (`collect.hcl`) plus the one-shot
-   *capture* jobs (`once.hcl`, `capture_out.hcl`); training is a different shape and
-   does not belong there.
+2. **Training runs on the Air, on demand** — see *Training is Air-only* above.
+   Gradient descent on MPS with oversampled minority classes is RAM-heavy and
+   worth watching the per-epoch val loss for, so it runs interactively on the
+   best hardware available and never on the weak always-on node. Nothing
+   schedules it on the mini.
 
 3. **Adapters/checkpoints land where serving auto-discovers them:** the best
    checkpoint (by val loss) is written to `train/checkpoints/` (via
-   `ConfigLoader.checkpoint_dir`) — on the mini, `--checkpoint-dir
-   /Volumes/dev/mountain/checkpoints`, which the next 15-minute tick loads
-   straight off the disk (it used to be uploaded to R2 for the inference
-   container to pull on cold start). See `CHECKPOINTS.md` for model history.
+   `ConfigLoader.checkpoint_dir`), and `just push-checkpoint` rsyncs it into
+   the mini's `checkpoints/` — which the next 15-minute tick loads straight
+   off the disk (it used to be uploaded to R2 for the inference container to
+   pull on cold start). See `CHECKPOINTS.md` for model history.
 
 4. **Weights and training data stay out of git** (see `.gitignore`). True in
    full since 2026-07-26 — the live `train/checkpoints/` weights were
@@ -109,13 +201,13 @@ The trainer **skips samples whose image or METAR is missing** (it resolves each
 key through the storage backend and `continue`s when either is absent), so a
 label pointing at a deleted capture is harmless — it is silently dropped, not
 an error. That means there is nothing to fix in this repo: `data/labels.yaml`
-is gitignored and has never been tracked, and the live file lives on the mini's
-dev disk.
+is gitignored and has never been tracked, and the live file lives on the mini,
+under `[mini] root`.
 
 What to do there, once, before the first Queen Anne training run:
 
 ```sh
-cd /Volumes/dev/mountain/data
+cd ~/mountain/data                     # /Volumes/dev/mountain/data before the disk move
 mv labels.yaml labels.uw-atg.yaml     # keep it: it is the UW era's record
 : > labels.yaml                        # start empty; the bot appends to this
 ```

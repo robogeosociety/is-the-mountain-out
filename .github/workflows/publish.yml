@@ -4,9 +4,12 @@
 # This replaced deploy-web.yml (wrangler → Cloudflare Worker) in 2026-09, when
 # inference moved back onto the mini. The build is ordinary; the interesting
 # part is where `state.json` comes from: NOT from the repo, and not from R2,
-# but from /Volumes/dev/mountain/live on the runner host itself. That is why
-# this job pins `runs-on: [self-hosted, macOS, fleet]` — it is the only runner
-# that can see the dev disk.
+# but from the tick's live directory on the runner host itself
+# (/Users/tommydoerr/mountain/live since the 2026-09-27 disk move; it was
+# /Volumes/dev/mountain/live before). That is why this job pins
+# `runs-on: [self-hosted, macOS, fleet]` — it is the only runner that can see
+# that directory. Override with the MOUNTAIN_LIVE repo variable if the path
+# moves again; the runner and the tick must agree.
 #
 # Triggered two ways:
 #   * workflow_dispatch — `gh workflow run publish.yml`, fired by mini/tick.sh
@@ -48,7 +51,7 @@ jobs:
     env:
       # Where the mini's tick writes. Overridable with a repo variable so a
       # second host (or a test) can point somewhere else.
-      MOUNTAIN_LIVE: ${{ vars.MOUNTAIN_LIVE || '/Volumes/dev/mountain/live' }}
+      MOUNTAIN_LIVE: ${{ vars.MOUNTAIN_LIVE || '/Users/tommydoerr/mountain/live' }}
       CUSTOM_DOMAIN: ${{ vars.MOUNTAIN_DOMAIN || 'mountainisout.robogeosociety.xyz' }}
     steps:
       - uses: actions/checkout@v4
@@ -67,16 +70,18 @@ jobs:
         working-directory: web
         run: npm run build
 
-      # The dev disk has wedged twice; a bounded probe keeps a hung access(2)
-      # from holding a runner slot for six hours. Same pattern as mini/tick.sh.
-      - name: Probe the dev disk
+      # Kept after the move to the boot volume: MOUNTAIN_LIVE is overridable
+      # and can point back under /Volumes, which has wedged three times. A
+      # bounded probe keeps a hung access(2) from holding a runner slot for six
+      # hours. Same pattern as mini/tick.sh.
+      - name: Probe the live directory
         run: |
           ( ls "$MOUNTAIN_LIVE" >/dev/null 2>&1 ) & probe=$!
           waited=0
           while kill -0 "$probe" 2>/dev/null; do
             if [ "$waited" -ge 20 ]; then
               kill -9 "$probe" 2>/dev/null || true
-              echo "::error title=Dev disk wedged::$MOUNTAIN_LIVE did not answer within 5s. Nothing was published."
+              echo "::error title=Live directory unreachable::$MOUNTAIN_LIVE did not answer within 5s (wedged disk?). Nothing was published."
               exit 1
             fi
             sleep 0.25

@@ -66,12 +66,51 @@ collection_seconds = 600 # 10 minutes for collection service (interval-based)
 # schedule = { Minute = 0 } # Optional: Run every hour on the hour (calendar-based)
 
 [storage]
-# Local since 2026-09: captures, labels and checkpoints live on the Mac mini's
-# dev disk (/Volumes/dev/mountain/), pulled out of R2 once by mini/r2-pull.sh.
+# Local since 2026-09: captures, labels and checkpoints live on the Mac mini
+# (/Users/tommydoerr/mountain/ on the boot volume; /Volumes/dev/mountain/
+# before the 2026-09-27 disk migration), pulled out of R2 once by
+# mini/r2-pull.sh.
 # The R2 backend still exists in collect/storage.py — set backend = "r2" plus
 # r2_account_id/r2_bucket to use it — but nothing in the live path does.
 backend = "local"
 cache_dir = ".r2cache"
+
+# ---------------------------------------------------------------------------
+# Where the two machines keep things. Training is AIR-ONLY (the mini is 8 GB
+# and must never train — docs/consolidation-plan-2026-09.md, 2026-09-27), so
+# the paths come in pairs: [paths] is the local training tree on whichever
+# machine runs `just train`, [mini] is the always-on host the labels come from
+# and the checkpoint goes back to. air/pull-labels.sh and
+# air/push-checkpoint.sh read both. `~` and $VARS are expanded by the reader.
+
+[paths]
+# The Air mirrors the mini's layout, so LocalStorage(data_root) and
+# `training batch` work unchanged on either machine.
+#
+#   <captures_dir>/YYYYMMDD/HHMMSS_ffffff_UTC/images/*.jpg   the frames
+#   <captures_dir>/YYYYMMDD/HHMMSS_ffffff_UTC/metar/metar.txt
+#   <labels_dir>/labels.yaml                                 capture key -> 0|1|2
+#   <labels_dir>/labels/discord-events.jsonl                 provenance log
+#
+# labels_dir and captures_dir are the same directory today and are named
+# separately on purpose: the labels are kilobytes and always pulled whole,
+# the captures are gigabytes and pulled only where a label points.
+captures_dir = "~/mountain/data"
+labels_dir = "~/mountain/data"
+checkpoint_dir = "~/mountain/checkpoints"
+
+[mini]
+# ALWAYS .local, never the tailnet name: Tailscale is not a dependency of this
+# fleet and the scripts refuse a *.ts.net host outright.
+host = "tommydoerr@tommys-mac-mini.local"
+# The tick's data root on the mini, on the boot volume since 2026-09-27
+# (/Volumes/dev/mountain before that). data/ and checkpoints/ are derived from
+# it; override with captures_dir / labels_dir / checkpoint_dir here if they
+# ever diverge.
+root = "/Users/tommydoerr/mountain"
+# The LaunchDaemon air/push-checkpoint.sh kickstarts so the next tick picks up
+# the new weights instead of waiting out the 15-minute interval.
+tick_label = "com.robogeosociety.mountain-tick"
 
 [bot]
 # Discord reaction-labeling bot (BOT.md). Secrets + channel/user ids live in
@@ -81,8 +120,12 @@ cache_dir = ".r2cache"
 # is no posting interval or daylight window to tune.
 sweep_hours = 72 # startup sweep re-reads this much channel history for missed reactions
 # `bot post-once` shows the model's live prediction. Served by GitHub Pages now;
-# the mini can also read /Volumes/dev/mountain/live/state.json directly.
+# the mini can also read $MOUNTAIN_ROOT/live/state.json directly.
 state_url = "https://mountainisout.robogeosociety.xyz/state.json"
 # Announcements the 15-minute tick has queued for the bot to post
-# (tools/predict_state.py --announce). One JSON object per line.
-announce_queue = "/Volumes/dev/mountain/live/announce.jsonl"
+# (tools/predict_state.py --announce). One JSON object per line. Follows the
+# tick's data root onto the boot volume — it was
+# /Volumes/dev/mountain/live/announce.jsonl before the 2026-09-27 migration,
+# and bot and tick must be moved together or the queue is written to one path
+# and drained from another.
+announce_queue = "/Users/tommydoerr/mountain/live/announce.jsonl"

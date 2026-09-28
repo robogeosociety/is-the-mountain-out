@@ -1,12 +1,14 @@
 #!/bin/bash
 # One mountain tick: capture a frame, run inference natively, publish.
 #
-# Driven by com.robogeosociety.mountain-tick.plist (StartInterval 900) on the
-# Mac mini. This is the entire production path since 2026-09 — there is no
-# Cloudflare Worker, no container, and no cron in the cloud. The tick:
+# Driven by mini/launchd/com.robogeosociety.mountain-tick.plist (a system
+# LaunchDaemon, StartInterval 900) on the Mac mini. This is the entire
+# production path since 2026-09 — there is no Cloudflare Worker, no container,
+# and no cron in the cloud. The tick:
 #
-#   1. bounded-probes the dev disk and BAILS if it is wedged
-#   2. `collect capture-once`      — webcam frame + METAR to the dev disk
+#   1. bounded-probes the dev disk and BAILS if it is wedged (only when
+#      something it needs still lives there)
+#   2. `collect capture-once`      — webcam frame + METAR to $MOUNTAIN_ROOT/data
 #   3. `tools/predict_state.py`    — native PyTorch (MPS), local checkpoint
 #      → live/state.json, live/history.jsonl, live/announce.jsonl
 #   4. `gh workflow run publish.yml` — GitHub Pages picks the files up
@@ -17,12 +19,18 @@
 # Run it by hand exactly the way launchd does:  bash mini/tick.sh
 set -uo pipefail
 
-# launchd hands a job a minimal PATH. Everything below (uv, gh, git) lives in
-# ~/.local/bin on this fleet; the rest is the system default.
-export PATH="$HOME/.local/bin:$HOME/.pixi/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# launchd hands a job a minimal PATH — a DAEMON gets even less than an agent,
+# and no login shell ever runs to fix it. Everything below (uv, gh, git) lives
+# in ~/.local/bin on this fleet, rsync and friends in /opt/homebrew/bin; the
+# rest is the system default. The plist sets the same string, so a by-hand run
+# and the daemon resolve the same binaries.
+export PATH="$HOME/.local/bin:$HOME/.pixi/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 DEV_ROOT="${MOUNTAIN_DEV_ROOT:-/Volumes/dev}"
-MOUNTAIN_ROOT="${MOUNTAIN_ROOT:-$DEV_ROOT/mountain}"
+# The data root lives on the BOOT volume now (consolidation plan, 2026-09-27).
+# It was $DEV_ROOT/mountain until the migration — the external disk that has
+# wedged three times and takes the tick down with it whenever it does.
+MOUNTAIN_ROOT="${MOUNTAIN_ROOT:-$HOME/mountain}"
 REPO_DIR="${MOUNTAIN_REPO:-$DEV_ROOT/is-the-mountain-out}"
 LIVE_DIR="${MOUNTAIN_LIVE:-$MOUNTAIN_ROOT/live}"
 DATA_ROOT="${MOUNTAIN_DATA:-$MOUNTAIN_ROOT/data}"
@@ -31,8 +39,11 @@ DEVICE="${MOUNTAIN_DEVICE:-mps}"
 REPO_SLUG="${MOUNTAIN_REPO_SLUG:-robogeosociety/is-the-mountain-out}"
 PROBE_TIMEOUT_SECONDS="${MOUNTAIN_PROBE_TIMEOUT:-5}"
 # Lock lives on the boot disk on purpose: a lock under /Volumes would be the
-# very thing the probe exists to avoid touching.
-LOCK_DIR="${TMPDIR:-/tmp}/mountain-tick.lock"
+# very thing the probe exists to avoid touching. A daemon does not get the
+# per-user $TMPDIR a login shell does, so the plist pins MOUNTAIN_LOCK_DIR to
+# /tmp — otherwise a by-hand run and the daemon would take two different locks
+# and cheerfully run two ticks at once.
+LOCK_DIR="${MOUNTAIN_LOCK_DIR:-${TMPDIR:-/tmp}/mountain-tick.lock}"
 
 log() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 die() { log "FATAL: $*"; exit 1; }
@@ -61,13 +72,28 @@ probe_dev_disk() {
     wait "$pid"        # 0 = readable, non-zero = absent/unreadable
 }
 
-probe_dev_disk "$DEV_ROOT" "$PROBE_TIMEOUT_SECONDS"
-probe_status=$?
-case "$probe_status" in
-    0) ;;
-    2) die "dev disk probe on $DEV_ROOT did not return within ${PROBE_TIMEOUT_SECONDS}s — disk is wedged, skipping this tick" ;;
-    *) die "dev disk $DEV_ROOT is not readable (probe exit $probe_status) — skipping this tick" ;;
-esac
+# The probe is only worth running while something the tick needs still lives
+# on the dev disk. Since the data root moved to the boot volume the repo is
+# usually the last holdout; once it moves too this becomes a no-op and the
+# tick stops caring whether /Volumes/dev is mounted at all. Keeping the code
+# rather than deleting it is deliberate: the disk is still attached, and a
+# path can drift back under it through one environment variable.
+needs_dev_disk=0
+case "$MOUNTAIN_ROOT/" in "$DEV_ROOT"/*) needs_dev_disk=1 ;; esac
+case "$REPO_DIR/" in "$DEV_ROOT"/*) needs_dev_disk=1 ;; esac
+case "$LIVE_DIR/" in "$DEV_ROOT"/*) needs_dev_disk=1 ;; esac
+case "$DATA_ROOT/" in "$DEV_ROOT"/*) needs_dev_disk=1 ;; esac
+case "$CHECKPOINT_DIR/" in "$DEV_ROOT"/*) needs_dev_disk=1 ;; esac
+
+if [ "$needs_dev_disk" = "1" ]; then
+    probe_dev_disk "$DEV_ROOT" "$PROBE_TIMEOUT_SECONDS"
+    probe_status=$?
+    case "$probe_status" in
+        0) ;;
+        2) die "dev disk probe on $DEV_ROOT did not return within ${PROBE_TIMEOUT_SECONDS}s — disk is wedged, skipping this tick" ;;
+        *) die "dev disk $DEV_ROOT is not readable (probe exit $probe_status) — skipping this tick" ;;
+    esac
+fi
 
 # --- 2. single instance ---------------------------------------------------
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then

@@ -10,7 +10,7 @@
 > Until that lands, `bot/` still runs standalone — but note what already
 > changed in Phase 2 (2026-09): **nothing posts from Cloudflare any more.** The
 > mini's 15-minute tick appends alert and label-request records to
-> `/Volumes/dev/mountain/live/announce.jsonl` (`[bot] announce_queue` in
+> `/Users/tommydoerr/mountain/live/announce.jsonl` (`[bot] announce_queue` in
 > `mountain.toml`), and the bot's job is to drain that queue and post each one
 > as itself — attaching the frame named by `capture_key`, footering that key,
 > and seeding 👍⛅👎. The decision of *whether* to post is already made, by
@@ -105,7 +105,7 @@ just bot-post-once   # capture + post one labelable message, then exit (setup ch
 just bot             # the real thing: reaction labeling + startup sweep
 
 # under Nomad on the always-on mini (sources cf.env itself):
-# Nomad is retired; run it directly (or under a KeepAlive LaunchAgent)
+# Nomad is retired; run it directly (or under a KeepAlive LaunchDaemon)
 just bot
 ```
 

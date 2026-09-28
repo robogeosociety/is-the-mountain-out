@@ -10,8 +10,20 @@ Append `?debug` to see confidence bars and the raw METAR readout.
 > **2026-09: Cloudflare is out of the path.** Inference ran as a Cloudflare
 > Worker + Container on a `*/15` cron and had been failing since 2026-09-15.
 > It now runs natively on the Mac mini every 15 minutes (`mini/`), writes
-> `state.json` to the dev disk, and a GitHub Pages deploy publishes it. No
+> `state.json` to local disk, and a GitHub Pages deploy publishes it. No
 > Worker, no Container, no R2, no Nomad. The older outage below is history.
+
+> [!NOTE]
+> **2026-09-27: two machines, and the tick is a LaunchDaemon.** The mini is
+> headless with FileVault on, so the only remote reboot is `sudo fdesetup
+> authrestart` — which boots to the login window with **no user session**, and
+> LaunchAgents do not run there. The tick is now a system daemon running as
+> `tommydoerr` (`mini/launchd/`), with its data root on the **boot volume**
+> (`/Users/tommydoerr/mountain`) rather than the external disk that has wedged
+> three times. And **training is Air-only**: the 8 GB mini collects, labels and
+> serves; the M4 Air pulls the labels over the LAN, trains on MPS, and pushes
+> the checkpoint back (`air/`, `TRAINING.md`).
+> See `docs/consolidation-plan-2026-09.md` → *what runs where*.
 
 > [!CAUTION]
 > **2026-09-24: the camera changed and the model has not caught up.** UW's ATG
@@ -90,13 +102,17 @@ on every push to `main` touching `web/**`. See [Deploying](#deploying).
 
 ```mermaid
 flowchart LR
-  subgraph mini["Mac mini (/Volumes/dev)"]
-    tick["mini/tick.sh<br/>LaunchAgent, every 900s"]
+  subgraph mini["Mac mini — always on, never trains"]
+    tick["mini/tick.sh<br/>LaunchDaemon, every 900s"]
     collector["collect capture-once<br/>(frame + METAR)"]
     infer["tools/predict_state.py<br/>ConvNeXt+LoRA on MPS"]
-    trainer["training batch<br/>(MPS, on demand)"]
     bot["single Discord bot<br/>(drains announce.jsonl)"]
-    disk[("/Volumes/dev/mountain/<br/>data · checkpoints · live")]
+    disk[("~/mountain/<br/>data · checkpoints · live")]
+  end
+
+  subgraph air["MacBook Air (M4) — on demand"]
+    trainer["training batch<br/>(MPS)"]
+    airdisk[("~/mountain/<br/>data · checkpoints")]
   end
 
   subgraph gh["GitHub"]
@@ -124,25 +140,32 @@ flowchart LR
   bot -- "frame + 👍⛅👎" --> discord(["Discord channel"])
   discord -- "reactions" --> bot
   bot -- "labels.yaml" --> disk
-  disk -- "labels + images" --> trainer
-  trainer -- "checkpoint" --> disk
+
+  disk -- "air/pull-labels.sh<br/>labels + referenced frames" --> airdisk
+  airdisk --> trainer
+  trainer -- "checkpoint + era.json" --> airdisk
+  airdisk -- "air/push-checkpoint.sh<br/>rsync + launchctl kickstart" --> disk
+  disk -- "checkpoint" --> infer
 ```
+
+Both rsyncs go over the LAN to `tommys-mac-mini.local`. Never the tailnet —
+the scripts refuse a `*.ts.net` host.
 
 ### Inference tick (every 15 min)
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant L as launchd
+  participant L as launchd (daemon)
   participant T as mini/tick.sh
-  participant D as /Volumes/dev
+  participant D as ~/mountain
   participant Cam as Queen Anne cam
   participant M as NOAA METAR
   participant A as GitHub Actions
   participant P as GitHub Pages
 
   L->>T: StartInterval 900 fires
-  T->>D: bounded probe (5s, in a child)
+  T->>D: bounded probe of /Volumes/dev (5s, in a child, only if used)
   alt disk wedged or unreadable
     T-->>L: exit non-zero, tick skipped
   else healthy
@@ -165,24 +188,30 @@ sequenceDiagram
   end
 ```
 
-### Training cycle (on demand)
+### Training cycle (on demand, on the Air)
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant Op as Operator
-  participant T as training batch
-  participant D as /Volumes/dev/mountain
-  participant Mac as Mac mini (MPS)
+  participant Op as Operator (Air)
+  participant P as air/pull-labels.sh
+  participant M as Mac mini (.local)
+  participant T as training batch (MPS)
+  participant S as air/push-checkpoint.sh
 
-  Op->>T: just train data/labels.yaml 5
-  T->>D: read captures + labels.yaml (LocalStorage)
-  T->>Mac: load checkpoint from checkpoints/
+  Op->>P: just pull-labels
+  P->>M: rsync labels.yaml + labels/
+  P->>M: rsync only the captures those labels name (+ METAR)
+  Op->>T: just train
   loop epochs
-    T->>Mac: forward + backward (MPS)
+    T->>T: forward + backward on MPS, best val loss wins
   end
-  T->>D: write checkpoints/* (best val_loss)
-  Note over D: the next tick loads it. No image, no upload, no restart.
+  T->>T: write checkpoints/* + era.json (the live camera's era)
+  Op->>S: just push-checkpoint
+  S->>S: refuse if era.json ≠ [webcam] era
+  S->>M: rsync checkpoint (old one kept in .previous)
+  S->>M: sudo launchctl kickstart system/…mountain-tick
+  Note over M: next tick loads it — status flips unvalidated → ok.<br/>No image, no upload, no restart.
 ```
 
 ## Current model state
@@ -190,8 +219,8 @@ sequenceDiagram
 **Nothing is trained on the live camera yet, and the site says so** —
 `status: "unvalidated"`, rendered as CHECKING…, until a Queen Anne checkpoint
 exists. The table below describes the last UW-era checkpoint, which still sits
-in `/Volumes/dev/mountain/checkpoints/` (it was R2 `checkpoints/` until
-2026-09) but is **no longer loaded**: the era gate refuses it. It is a record
+in `/Users/tommydoerr/mountain/checkpoints/` on the mini (it was R2
+`checkpoints/` until 2026-09) but is **no longer loaded**: the era gate refuses it. It is a record
 of what was, not a claim about what the site is saying.
 
 | Field | Value |
@@ -201,7 +230,7 @@ of what was, not a claim about what the site is saying.
 | Head input | 768-dim image features ⊕ 2-dim weather (visibility, ceiling) |
 | Classes | 0 = Not Out, 1 = Full, 2 = Partial |
 | Capture window | 2026-02-22 → 2026-04-24 (55 days) |
-| Captures on the dev disk | 2,057 jpgs + matching METAR |
+| Captures archived on the mini | 2,057 jpgs + matching METAR |
 | Labeled dataset | 2,000 (1,727 Not Out / 109 Full / 164 Partial) |
 | Best val loss | 0.0782 |
 | Val accuracy | 97.6% (15% stratified held-out, single-epoch run) |
@@ -225,8 +254,9 @@ Targets the model is trying to meet before announcing "out" with confidence:
 ## Repository layout
 
 ```
-mountain.toml         configuration (mountain, webcam, METAR, training, storage, bot)
-mini/                 the production runtime: tick.sh, LaunchAgent plist, install.sh, r2-pull.sh
+mountain.toml         configuration (mountain, webcam, METAR, training, paths, mini, storage, bot)
+mini/                 the serving runtime: tick.sh, launchd/ daemon plist, install.sh, r2-pull.sh
+air/                  the training side: pull-labels.sh, push-checkpoint.sh, _config.sh
 collect/              capture collector + storage backends + classifier server
 bot/                  Discord reaction labeling (see BOT.md) + transition.py (what the channel says)
 train/                model definition, scheduler, config loader, checkpoints
@@ -250,8 +280,11 @@ just tick-local               # …without dispatching the Pages deploy
 uv run collect capture-once   # one headless capture (webcam + METAR), prints the key
 uv run collect live           # continuous capture loop
 
-# Training
-uv run training batch --labels data/labels.yaml --epochs N
+# Training — on the Air only; the mini is 8 GB and never trains (TRAINING.md)
+just pull-labels              # rsync the mini's labels + the frames they name
+just train                    # training batch on MPS, 5 epochs, era.json stamped
+just push-checkpoint          # rsync back + kickstart the tick, with an era check
+uv run training batch --labels ~/mountain/data/labels.yaml --epochs N
 uv run training live          # continuous live capture + gradient accumulation
 uv run training once          # single capture + train cycle, then exit
 
@@ -265,9 +298,9 @@ uv run --group bot bot post-once    # post one labelable capture, then exit
 
 # Inference (native; MPS where available, CPU otherwise)
 uv run python tools/predict_state.py --config mountain.toml \
-    --out /Volumes/dev/mountain/live/state.json \
-    --log /Volumes/dev/mountain/live/history.jsonl \
-    --checkpoint-dir /Volumes/dev/mountain/checkpoints
+    --out ~/mountain/live/state.json \
+    --log ~/mountain/live/history.jsonl \
+    --checkpoint-dir ~/mountain/checkpoints
 
 # Public SPA: dev server, lint + typecheck + build (web-ci.yml)
 cd web && npm ci && npm run dev
@@ -281,11 +314,12 @@ GitHub Pages.
 
 | What | Where it runs | Trigger |
 |---|---|---|
-| capture + inference | Mac mini, `mini/tick.sh` under launchd | `StartInterval 900` |
+| capture + inference | Mac mini, `mini/tick.sh` under a system LaunchDaemon | `StartInterval 900` |
 | publish | `publish.yml` on the self-hosted `[self-hosted, macOS, fleet]` runner | `gh workflow run publish.yml` from the tick, plus a `*/15` schedule as backstop |
+| model | the Air, `just train` → `just push-checkpoint` | on demand; the next tick serves it |
 
 The workflow builds `web/`, copies `state.json` + `history.jsonl` out of
-`/Volumes/dev/mountain/live` (which is why it must run on the mini's runner),
+`/Users/tommydoerr/mountain/live` (which is why it must run on the mini's runner),
 writes a `CNAME` for `mountainisout.robogeosociety.xyz` into the artifact, and
 ships it with `actions/upload-pages-artifact` + `actions/deploy-pages`. No
 commit churn: nothing is pushed to a branch.
@@ -295,11 +329,19 @@ gh workflow run publish.yml     # republish whatever is on the dev disk now
 just publish                    # the same thing
 ```
 
-Installing or reinstalling the tick on the mini:
+Installing or reinstalling the tick on the mini — **at the console, as
+`tommydoerr`, not under `sudo`** (the script sudo's the three steps that need
+root, and a dropped ssh session between its `bootout` and `bootstrap` leaves
+the tick unloaded):
 
 ```bash
-bash mini/install.sh            # in a GUI session, not over ssh — see mini/README.md
+bash mini/install.sh            # → /Library/LaunchDaemons + /usr/local/libexec
+sudo launchctl kickstart -p system/com.robogeosociety.mountain-tick
 ```
+
+It survives `sudo fdesetup authrestart` with nobody logged in — which is the
+whole reason it is a daemon. `mini/README.md` has the verification and the one
+sudoers line the unattended reboot needs.
 
 There are no Cloudflare credentials in this repo and no `wrangler` anywhere in
 the tree. `CLOUDFLARE_API_TOKEN` and the `production` / `production-web`
@@ -320,8 +362,15 @@ Single source of truth: `mountain.toml`.
   `checkpoint_era`: the era assumed for a checkpoint with no `era.json` beside
   it (everything trained before 2026-09-24 is `uw-atg` by definition)
 - `[collection]` — capture cadence
-- `[storage]` — `backend = "local"`; the dev disk is the store
-- `[bot]` — sweep window, state URL, announce-queue path
+- `[paths]` — the **local** training tree on whichever machine runs `just
+  train` (`captures_dir`, `labels_dir`, `checkpoint_dir`); `~` is expanded
+- `[mini]` — the always-on host the Air pulls labels from and pushes
+  checkpoints to: `host` (always `.local`, never the tailnet), `root`, and the
+  daemon `tick_label` to kickstart. The `air/` scripts read both sections
+  through `ConfigLoader`, so the shell and the trainer cannot disagree about
+  where the labels are
+- `[storage]` — `backend = "local"`; the mini's boot volume is the store
+- `[bot]` — sweep window, state URL, announce-queue path (follows `[mini] root`)
 
 What the channel says is no longer Worker `[vars]`; it is the two flags on the
 inference command, defaulted in `bot/transition.py`:
@@ -339,17 +388,20 @@ keys in it are only needed for the one-shot `mini/r2-pull.sh`.
 
 | Component | Host | Trigger |
 |---|---|---|
-| Capture + inference | Mac mini (launchd, native MPS) | every 900s, `mini/tick.sh` |
-| Model checkpoint + captures | `/Volumes/dev/mountain/` (restic to R2 nightly) | (always) |
+| Capture + inference | Mac mini, **system LaunchDaemon**, native MPS | every 900s, `mini/tick.sh` |
+| Live state + captures + served checkpoint | `/Users/tommydoerr/mountain/` on the mini's boot volume (restic to R2 nightly) | (always) |
 | Discord alerts + labels | Mac mini, single Discord bot draining `announce.jsonl` | on a queued announcement |
-| Training | Mac mini (MPS) | on demand (`just train`) |
+| **Training** | **MacBook Air (M4), MPS — never the mini** | on demand: `just pull-labels` → `just train` → `just push-checkpoint` |
 | Public SPA | GitHub Pages | `publish.yml` |
 | CI (ruff, pytest, web build) | GitHub-hosted runners | PRs and pushes to main |
 
-GitHub hosts the source, the CI, and the site. The mini does all the compute and
-owns all the state. Nothing in the live path bills by the request, and the two
-failure modes are honest: a wedged dev disk skips ticks (the site goes stale and
-says so), and a GitHub outage delays publishing but not prediction.
+GitHub hosts the source, the CI, and the site. The mini owns the live state and
+runs everything that has to be awake at 3 a.m.; the Air owns the model and runs
+the one workload an 8 GB machine should not. Nothing in the live path bills by
+the request, and the failure modes are honest: a mini that is asleep or wedged
+skips ticks (the site goes stale and says so), a GitHub outage delays
+publishing but not prediction, and an Air that is shut is simply a week without
+a retrain.
 
 ## Network access (Mac mini)
 
@@ -364,7 +416,9 @@ The internal labeling UI is exposed over the LAN and Tailscale:
 - `uv venv && uv pip install -e .` once at the top of the repo.
 - For the Discord bot only: create `cf.env` (gitignored) with `DISCORD_BOT_TOKEN`,
   `DISCORD_CHANNEL_ID` and optionally `DISCORD_ALLOWED_USER_IDS` — see `BOT.md`.
-- On the mini: `bash mini/r2-pull.sh` once, then `bash mini/install.sh`. See
-  `mini/README.md`.
+- On the mini: `bash mini/r2-pull.sh` once, then `bash mini/install.sh` at the
+  console. See `mini/README.md`.
+- On the Air (training only): an ssh key on the mini and `rsync` on `PATH`.
+  `just pull-labels` sets the rest up itself. See `TRAINING.md`.
 
 See `CLAUDE.md` for in-repo conventions (data layout, Vite port registry, etc.).

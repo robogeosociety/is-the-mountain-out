@@ -19,13 +19,33 @@ This document catalogs the major model checkpoints saved during the project's de
 > If the Queen Anne camera is ever repointed (it is a PTZ broadcast camera),
 > this same caution applies again to whatever was trained before the move.
 
+## Where a checkpoint lives, and how it gets there
+
+Since 2026-09-27 the two halves are on different machines (`TRAINING.md` →
+*Training is Air-only*):
+
+| | Path | Written by |
+| --- | --- | --- |
+| Air (trains) | `[paths] checkpoint_dir`, default `~/mountain/checkpoints` | `training batch` — best val loss wins, `era.json` stamped on every save |
+| mini (serves) | `[mini] root`/`checkpoints`, i.e. `/Users/tommydoerr/mountain/checkpoints` | `air/push-checkpoint.sh`, which rsyncs and then kickstarts the tick |
+| mini (previous) | `checkpoints/.previous` | the same rsync — rolling back is a copy, not a retrain |
+
+`air/push-checkpoint.sh` **refuses a checkpoint whose `era.json` does not
+match `[webcam] era`**, because the failure it prevents is invisible: the tick
+would load it, refuse it, and publish `status: "unvalidated"` forever with
+nothing in the log saying which checkpoint was wrong.
+
+Weights are not in git (since 2026-07-26) and no longer in R2 (since
+2026-09). The mini's copy is the one being served; restic backs it up nightly.
+
 ## Era 2: KING 5 Queen Anne (2026-09-24 →)
 
 ### 6. *(none yet)*
 - **Status:** **No checkpoint trained on this camera.** The tick runs and the
-  site publishes, but predictions are the old model's guesses on a view it was
-  never fit to — treat them as noise. Collect Queen Anne labels via the
-  Discord reaction labeler (`BOT.md`), then `just train`.
+  site publishes, but it publishes `status: "unvalidated"` and no prediction
+  — the era gate refuses the UW weights rather than guessing with them.
+  Collect Queen Anne labels via the Discord reaction labeler (`BOT.md`), then
+  on the Air: `just pull-labels && just train && just push-checkpoint`.
 - **Baseline to beat:** none. The first run sets it. Report macro-F1, balanced
   accuracy and the visible-class precision (`train/metrics.py`) as usual.
 
@@ -61,10 +81,10 @@ record and for the reasoning; none of them is a valid model for the live site.
   invalid for the Queen Anne framing (see the caution at the top).
 - **Weights left git on 2026-07-26.** The live checkpoint was the R2
   `checkpoints/` object set until 2026-09; it is now
-  `/Volumes/dev/mountain/checkpoints/` on the mini (pulled out of R2 once by
-  `mini/r2-pull.sh`, backed up nightly by restic), rewritten by the weekly
-  supervisor-scheduled retrain (`TRAINING.md`) and loaded directly by the
-  15-minute tick. `train/checkpoints/` is an untracked local working
+  `/Users/tommydoerr/mountain/checkpoints/` on the mini (pulled out of R2 once
+  by `mini/r2-pull.sh`, moved off `/Volumes/dev` on 2026-09-27, backed up
+  nightly by restic), replaced by `air/push-checkpoint.sh` after a run on the
+  Air and loaded directly by the 15-minute tick. `train/checkpoints/` is an untracked local working
   copy. Committing the
   binaries had two failure modes: the mini's checkout went permanently dirty
   after every scheduled run, and the committed copy silently drifted stale

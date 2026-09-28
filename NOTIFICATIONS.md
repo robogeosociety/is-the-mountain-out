@@ -7,7 +7,7 @@
 > `worker/src/transition.ts` to `bot/transition.py`. What changed is the
 > plumbing: the mini's 15-minute tick (`mini/tick.sh` →
 > `tools/predict_state.py --announce`) *decides* and appends the post to
-> `/Volumes/dev/mountain/live/announce.jsonl`; the single Discord bot drains
+> `~/mountain/live/announce.jsonl`; the single Discord bot drains
 > that queue and posts it. Where this file says "the Worker", read "the tick".
 > `notify-state.json` is now a file in `live/`, not an R2 object; the
 > thresholds are `--alert-min-confidence` / `--label-cooldown-hours` rather
