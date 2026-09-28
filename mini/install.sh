@@ -16,8 +16,7 @@
 #      anywhere — which is exactly how agents on this mini have gone dark for
 #      days at a time.
 #   2. The first run of a new daemon can raise a TCC prompt (Files and
-#      Folders, or Full Disk Access if the data root ever moves back under
-#      /Volumes). Only a logged-in session can answer one; over ssh it is
+#      Folders). Only a logged-in session can answer one; over ssh it is
 #      denied silently.
 #
 # Why a daemon at all: the mini is headless with FileVault on, and the remote
@@ -63,9 +62,9 @@ fi
 
 plutil -lint "$PLIST_SRC" >/dev/null
 
-# The tick script is copied to the BOOT disk, root-owned. launchd exec's it
-# every 15 minutes; run from /Volumes/dev it would hang on a wedged disk
-# before the script's own bounded probe could bail. See the plist header.
+# The tick script is copied out of the checkout, root-owned, next to the
+# plist. launchd exec's it every 15 minutes, and the schedule should not depend
+# on a working tree somebody is mid-rebase on. See the plist header.
 sudo mkdir -p "$LIBEXEC_DIR"
 sudo install -m 0755 -o root -g wheel "$SRC_DIR/tick.sh" "$INSTALLED_SCRIPT"
 

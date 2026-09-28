@@ -33,7 +33,7 @@ uv run --group bot bot run           # reaction labeling + startup sweep
 uv run --group bot bot post-once     # one labelable post, then exit (setup check)
 
 # The production tick (what launchd runs on the mini every 15 minutes)
-just tick                   # probe + capture + native inference + publish
+just tick                   # capture + native inference + publish
 just tick-local             # the same, without dispatching the Pages deploy
 just publish                # gh workflow run publish.yml
 just install-daemon         # (re)install the LaunchDaemon — at the mini's console
@@ -143,28 +143,27 @@ Workers Paid plan.
 — a **system LaunchDaemon** since 2026-09-27, because the mini's only remote
 reboot (`sudo fdesetup authrestart`) leaves no user session and LaunchAgents do
 not run at the login window — runs `mini/tick.sh` every 900s as
-`tommydoerr:staff`. It (1) bounded-probes `/Volumes/dev` in a child process and
-exits if the probe does not return within 5s (only when a configured path is
-still under it), (2) runs `collect capture-once`, (3) runs
+`tommydoerr:staff`. It (1) runs `collect capture-once`, (2) runs
 `tools/predict_state.py` natively on MPS with a checkpoint from
-`$MOUNTAIN_ROOT/checkpoints` (`/Users/tommydoerr/mountain`, on the boot
-volume), writing
+`$MOUNTAIN_ROOT/checkpoints`, writing
 `live/state.json` (temp file + rename) and appending `live/history.jsonl`, and
-(4) fires `gh workflow run publish.yml`. Read `mini/README.md` before touching
+(3) fires `gh workflow run publish.yml`. Read `mini/README.md` before touching
 any of it.
+
+**Everything is on the mini's boot volume** since 2026-09-27: the data root is
+`/Users/tommydoerr/mountain` and the checkout the tick runs in is
+`/Users/tommydoerr/src/is-the-mountain-out` (`MOUNTAIN_REPO`). `/Volumes/dev`
+wedged three times and took the site with it each time; only overflow lives
+there now. The bounded dev-disk probe that used to open every tick is **gone**,
+along with `MOUNTAIN_DEV_ROOT` and `MOUNTAIN_PROBE_TIMEOUT` — do not
+reintroduce it for a path that cannot occur.
 
 Three things about that script are load-bearing:
 
-- **The bounded probe.** `/Volumes/dev` has wedged twice; `access(2)` hangs
-  while `ls` and `df` report a healthy mount. launchd will not start a new
-  instance of a job whose previous one never exited, so an unbounded `stat`
-  here does not fail the tick, it silences the site permanently. The probe runs
-  in a child, the parent kills it at the deadline, and the parent never touches
-  the path itself.
-- **`install.sh` copies the script to `/usr/local/libexec`** (root:wheel, boot
-  volume). launchd exec's the path in `ProgramArguments`; if that path were on
-  the dev disk, a wedge would hang the exec before the script's own probe could
-  run. Re-run `install.sh` after editing `tick.sh` — the daemon runs the copy.
+- **`install.sh` copies the script to `/usr/local/libexec`** (root:wheel), and
+  launchd exec's that path, not the one in the checkout — the 15-minute
+  schedule must not depend on a working tree somebody is mid-rebase on. Re-run
+  `install.sh` after editing `tick.sh` — the daemon runs the copy.
 - **A daemon has no inherited environment.** `HOME`, `PATH` and every
   `MOUNTAIN_*` root are written out in the plist, including
   `MOUNTAIN_LOCK_DIR=/tmp/mountain-tick.lock` (a daemon gets no per-user

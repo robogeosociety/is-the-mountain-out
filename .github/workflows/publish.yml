@@ -4,12 +4,18 @@
 # This replaced deploy-web.yml (wrangler → Cloudflare Worker) in 2026-09, when
 # inference moved back onto the mini. The build is ordinary; the interesting
 # part is where `state.json` comes from: NOT from the repo, and not from R2,
-# but from the tick's live directory on the runner host itself
-# (/Users/tommydoerr/mountain/live since the 2026-09-27 disk move; it was
-# /Volumes/dev/mountain/live before). That is why this job pins
+# but from the tick's live directory on the runner host itself,
+# /Users/tommydoerr/mountain/live. That is why this job pins
 # `runs-on: [self-hosted, macOS, fleet]` — it is the only runner that can see
 # that directory. Override with the MOUNTAIN_LIVE repo variable if the path
-# moves again; the runner and the tick must agree.
+# moves; the runner and the tick must agree.
+#
+# Everything the mountain needs is on the mini's BOOT volume since 2026-09-27:
+# the live files above, and the tick's own checkout at
+# /Users/tommydoerr/src/is-the-mountain-out (MOUNTAIN_REPO). This workflow
+# checks the repo out fresh into the runner's workspace and does not read that
+# copy — but they are the same commit, and a runner pointed at a wedged
+# external disk was how the site used to go quiet.
 #
 # Triggered two ways:
 #   * workflow_dispatch — `gh workflow run publish.yml`, fired by mini/tick.sh
@@ -70,10 +76,12 @@ jobs:
         working-directory: web
         run: npm run build
 
-      # Kept after the move to the boot volume: MOUNTAIN_LIVE is overridable
-      # and can point back under /Volumes, which has wedged three times. A
-      # bounded probe keeps a hung access(2) from holding a runner slot for six
-      # hours. Same pattern as mini/tick.sh.
+      # MOUNTAIN_LIVE is a repo variable, so it can be pointed at a network or
+      # external volume by someone who is not thinking about access(2) hanging
+      # forever. A bounded probe keeps that from holding a runner slot for six
+      # hours. (mini/tick.sh dropped its equivalent when the last path it
+      # touched moved onto the boot volume; this one guards a value CI does not
+      # control.)
       - name: Probe the live directory
         run: |
           ( ls "$MOUNTAIN_LIVE" >/dev/null 2>&1 ) & probe=$!

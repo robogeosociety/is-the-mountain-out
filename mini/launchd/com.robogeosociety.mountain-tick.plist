@@ -25,19 +25,24 @@
     HOME=/var/root (or nothing) and a bare PATH, so HOME, PATH and the
     MOUNTAIN_* roots are explicit. /opt/homebrew/bin is on PATH for rsync and
     friends; ~/.local/bin carries uv and gh.
-  * MOUNTAIN_ROOT lives on the BOOT volume (/Users/tommydoerr/mountain). The
-    pre-migration value was /Volumes/dev/mountain — the external disk that has
-    wedged three times. See mini/README.md → "Where the data lives".
+  * MOUNTAIN_ROOT and MOUNTAIN_REPO both live on the BOOT volume
+    (/Users/tommydoerr/mountain and /Users/tommydoerr/src/is-the-mountain-out).
+    The disk plan puts everything critical on the internal disk and leaves only
+    overflow on /Volumes/dev — the external disk that has wedged three times
+    and taken the site with it each time. Nothing the tick touches lives there
+    any more, which is why tick.sh no longer probes it at all. See
+    mini/README.md → "Where everything lives".
   * MOUNTAIN_LOCK_DIR is pinned to /tmp because a daemon does not get the
     per-user $TMPDIR a shell does; pinning it means a by-hand run and the
     daemon contend for the same lock instead of running two ticks at once.
 
   Two older choices that still hold:
 
-  * ProgramArguments points at /usr/local/libexec, never at a copy on
-    /Volumes/dev. launchd exec's this path every 15 minutes; on the dev disk a
-    wedge would hang the exec itself and the script's own bounded probe would
-    never get to run. install.sh copies the script onto the boot disk for this.
+  * ProgramArguments points at /usr/local/libexec, never at the copy inside
+    the checkout. launchd exec's this path every 15 minutes, and keeping it
+    root-owned on the boot volume means the schedule does not depend on a
+    working tree somebody is mid-rebase on. install.sh puts it there; re-run
+    install.sh after editing tick.sh.
   * StartInterval, not StartCalendarInterval: ticks are "every 15 minutes", not
     "at :00/:15/:30/:45", and a missed wall-clock slot must not queue a burst.
 -->
@@ -79,9 +84,7 @@
         <key>MOUNTAIN_ROOT</key>
         <string>/Users/tommydoerr/mountain</string>
         <key>MOUNTAIN_REPO</key>
-        <string>/Volumes/dev/is-the-mountain-out</string>
-        <key>MOUNTAIN_DEV_ROOT</key>
-        <string>/Volumes/dev</string>
+        <string>/Users/tommydoerr/src/is-the-mountain-out</string>
         <key>MOUNTAIN_DEVICE</key>
         <string>mps</string>
         <key>MOUNTAIN_REPO_SLUG</key>

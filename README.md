@@ -165,10 +165,6 @@ sequenceDiagram
   participant P as GitHub Pages
 
   L->>T: StartInterval 900 fires
-  T->>D: bounded probe of /Volumes/dev (5s, in a child, only if used)
-  alt disk wedged or unreadable
-    T-->>L: exit non-zero, tick skipped
-  else healthy
     T->>Cam: collect capture-once
     T->>M: METAR (KSEA)
     T->>D: write capture + metar (raw, uncropped)

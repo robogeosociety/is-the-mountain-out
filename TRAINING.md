@@ -207,7 +207,7 @@ under `[mini] root`.
 What to do there, once, before the first Queen Anne training run:
 
 ```sh
-cd ~/mountain/data                     # /Volumes/dev/mountain/data before the disk move
+cd ~/mountain/data                     # on the mini, boot volume
 mv labels.yaml labels.uw-atg.yaml     # keep it: it is the UW era's record
 : > labels.yaml                        # start empty; the bot appends to this
 ```
