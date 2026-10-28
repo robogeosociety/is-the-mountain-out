@@ -10,7 +10,10 @@ set -euo pipefail
 
 REPO="${MOUNTAIN_REPO:-/Volumes/dev/is-the-mountain-out}"
 cd "$REPO"
-set -a; source cf.env; set +a
+# cf.env is the Discord bot's credentials (gitignored) — the trainer posts its
+# run summary to the channel. Optional since 2026-09: storage is the dev disk,
+# so a missing cf.env costs telemetry, not the run.
+if [ -f cf.env ]; then set -a; source cf.env; set +a; fi
 export PATH="$HOME/.local/bin:$PATH"  # uv — the supervisor's child env is minimal
 
 exec uv run python -m train.scheduled "$@"

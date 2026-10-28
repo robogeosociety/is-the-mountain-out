@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Mountain tick — capture + native inference + publish, every 15 minutes.
+
+  A LaunchDAEMON (/Library/LaunchDaemons), not a LaunchAgent. Read
+  mini/README.md before editing; install with `bash mini/install.sh` at the
+  mini's console.
+
+  Why a daemon (2026-09-27, docs/consolidation-plan-2026-09.md → "what runs
+  where"): the mini is headless with FileVault on, and a remote reboot is
+  `sudo fdesetup authrestart` — which unlocks the disk once and then boots to
+  the LOGIN WINDOW. There is no user session, so no LaunchAgent runs. Every
+  always-on service on this machine therefore becomes a daemon; the tick is
+  one of them. As a user agent it stayed dark after every unattended reboot.
+
+  A daemon starts as root, so everything a login session would have supplied
+  has to be written down here:
+
+  * UserName/GroupName drop it to tommydoerr:staff before exec. The captures,
+    the checkpoints and ~/.local/bin all belong to that user, and a tick
+    running as root would leave root-owned files behind for the trainer and
+    the publish runner to trip over.
+  * EnvironmentVariables is the whole environment. launchd gives a daemon
+    HOME=/var/root (or nothing) and a bare PATH, so HOME, PATH and the
+    MOUNTAIN_* roots are explicit. /opt/homebrew/bin is on PATH for rsync and
+    friends; ~/.local/bin carries uv and gh.
+  * MOUNTAIN_ROOT and MOUNTAIN_REPO both live on the BOOT volume
+    (/Users/tommydoerr/mountain and /Users/tommydoerr/src/is-the-mountain-out).
+    The disk plan puts everything critical on the internal disk and leaves only
+    overflow on /Volumes/dev — the external disk that has wedged three times
+    and taken the site with it each time. Nothing the tick touches lives there
+    any more, which is why tick.sh no longer probes it at all. See
+    mini/README.md → "Where everything lives".
+  * MOUNTAIN_LOCK_DIR is pinned to /tmp because a daemon does not get the
+    per-user $TMPDIR a shell does; pinning it means a by-hand run and the
+    daemon contend for the same lock instead of running two ticks at once.
+
+  Two older choices that still hold:
+
+  * ProgramArguments points at /usr/local/libexec, never at the copy inside
+    the checkout. launchd exec's this path every 15 minutes, and keeping it
+    root-owned on the boot volume means the schedule does not depend on a
+    working tree somebody is mid-rebase on. install.sh puts it there; re-run
+    install.sh after editing tick.sh.
+  * StartInterval, not StartCalendarInterval: ticks are "every 15 minutes", not
+    "at :00/:15/:30/:45", and a missed wall-clock slot must not queue a burst.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.robogeosociety.mountain-tick</string>
+
+    <key>UserName</key>
+    <string>tommydoerr</string>
+    <key>GroupName</key>
+    <string>staff</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/usr/local/libexec/mountain-tick.sh</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/tommydoerr</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/tommydoerr</string>
+        <key>USER</key>
+        <string>tommydoerr</string>
+        <key>LOGNAME</key>
+        <string>tommydoerr</string>
+        <key>PATH</key>
+        <string>/Users/tommydoerr/.local/bin:/Users/tommydoerr/.pixi/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>MOUNTAIN_ROOT</key>
+        <string>/Users/tommydoerr/mountain</string>
+        <key>MOUNTAIN_REPO</key>
+        <string>/Users/tommydoerr/src/is-the-mountain-out</string>
+        <key>MOUNTAIN_DEVICE</key>
+        <string>mps</string>
+        <key>MOUNTAIN_REPO_SLUG</key>
+        <string>robogeosociety/is-the-mountain-out</string>
+        <key>MOUNTAIN_LOCK_DIR</key>
+        <string>/tmp/mountain-tick.lock</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/tommydoerr/Library/Logs/mountain-tick.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/tommydoerr/Library/Logs/mountain-tick.err.log</string>
+
+    <!-- An 8 GB mini runs this alongside a Discord bot and a transit daemon.
+         Inference is not interactive; let it yield. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>5</integer>
+
+    <!-- If a tick somehow outlives its interval, launchd SIGTERMs it and the
+         script's own lock keeps the next one from piling on. -->
+    <key>ExitTimeOut</key>
+    <integer>600</integer>
+    <key>AbandonProcessGroup</key>
+    <false/>
+</dict>
+</plist>

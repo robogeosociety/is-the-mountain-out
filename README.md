@@ -1,21 +1,60 @@
 # is-the-mountain-out
 
-Real-time image classifier that determines whether Mount Rainier is "out" (visible) from a live UW webcam, augmented with METAR weather data. ConvNeXt Tiny backbone + LoRA fine-tuning, trained on Apple Silicon (MPS), served from Cloudflare.
+Real-time image classifier that determines whether Mount Rainier is "out" (visible) from a live Seattle webcam, augmented with METAR weather data. ConvNeXt Tiny backbone + LoRA fine-tuning, trained and now *served* from Apple Silicon (MPS) on a Mac mini, published as a static site.
 
-**Live site:** https://is-the-mountain-out.tommy-b-doerr.workers.dev
+**Live site:** https://mountainisout.robogeosociety.xyz
+(fallback: https://robogeosociety.github.io/is-the-mountain-out/)
 Append `?debug` to see confidence bars and the raw METAR readout.
 
 > [!NOTE]
-> The site was down from 2026-08-07 to 2026-09-02 — three independent faults,
-> written up below in [Outage post-mortem](#outage-post-mortem-2026-08-07--2026-09-02).
-> All three are resolved. The old GitHub Pages URL,
-> `https://robogeosociety.github.io/is-the-mountain-out/`, still serves the
-> 2026-05-25 build and works again as a fallback, but it is no longer the site.
+> **2026-09: Cloudflare is out of the path.** Inference ran as a Cloudflare
+> Worker + Container on a `*/15` cron and had been failing since 2026-09-15.
+> It now runs natively on the Mac mini every 15 minutes (`mini/`), writes
+> `state.json` to local disk, and a GitHub Pages deploy publishes it. No
+> Worker, no Container, no R2, no Nomad. The older outage below is history.
+
+> [!NOTE]
+> **2026-09-27: two machines, and the tick is a LaunchDaemon.** The mini is
+> headless with FileVault on, so the only remote reboot is `sudo fdesetup
+> authrestart` — which boots to the login window with **no user session**, and
+> LaunchAgents do not run there. The tick is now a system daemon running as
+> `tommydoerr` (`mini/launchd/`), with its data root on the **boot volume**
+> (`/Users/tommydoerr/mountain`) rather than the external disk that has wedged
+> three times. And **training is Air-only**: the 8 GB mini collects, labels and
+> serves; the M4 Air pulls the labels over the LAN, trains on MPS, and pushes
+> the checkpoint back (`air/`, `TRAINING.md`).
+> See `docs/consolidation-plan-2026-09.md` → *what runs where*.
+
+> [!CAUTION]
+> **2026-09-24: the camera changed and the model has not caught up.** UW's ATG
+> webcam 404'd for good on ~2026-09-15 and is gone from their server listing;
+> the feed is now the **KING 5 Queen Anne tower camera** (`WEBCAMS.md`).
+> Different view, so **the existing checkpoint is invalid for this framing and
+> the labels restart from zero**.
+>
+> **The site does not guess in the meantime.** `[webcam] era` names the live
+> camera and every checkpoint records the era it was trained under
+> (`train/checkpoint_era.py`); when they disagree the old weights are **never
+> loaded**, `state.json` carries `status: "unvalidated"` with no prediction,
+> and the page shows **CHECKING…**. No Discord alerts fire either. What *does*
+> keep running is the labeling loop — a frame still goes to the channel on the
+> usual cooldown so 👍/⛅/👎 reactions accumulate, which is the only route to a
+> checkpoint that would be valid here. Details: `TRAINING.md` and
+> `CHECKPOINTS.md`.
 
 ![Mount Rainier Topo Map](assets/map.png)
-*Mount Rainier, the UW ATG webcam (north-northwest), and KSEA METAR station.*
+*Mount Rainier, the webcam (north-northwest) and the KSEA METAR station. The
+camera moved from UW's ATG building to KING 5's Queen Anne tower on 2026-09-24
+— a few km, same sightline; the map is close enough to still read true.*
 
 ## Outage post-mortem (2026-08-07 → 2026-09-02)
+
+> [!NOTE]
+> History, kept for the lessons. The Cloudflare files it names (`worker/`,
+> `web/worker/index.ts`, `web/wrangler.toml`, the two deploy workflows) were
+> deleted in 2026-09 when inference moved to the mini and the site moved to
+> GitHub Pages — which is, with a working deploy this time, where that
+> migration was trying to go.
 
 The README advertised `https://is-the-mountain-out.pages.dev` until 2026-08-24. That
 hostname never resolved: the Cloudflare Pages project the 2026-05-25 migration
@@ -63,100 +102,122 @@ on every push to `main` touching `web/**`. See [Deploying](#deploying).
 
 ```mermaid
 flowchart LR
-  subgraph local["Mac mini (local)"]
-    collector["collect collector<br/>(Nomad, on-demand)"]
-    labeler["bot labeler<br/>(Nomad, always-on)"]
-    trainer["training batch<br/>(MPS, on-demand)"]
+  subgraph mini["Mac mini — always on, never trains"]
+    tick["mini/tick.sh<br/>LaunchDaemon, every 900s"]
+    collector["collect capture-once<br/>(frame + METAR)"]
+    infer["tools/predict_state.py<br/>ConvNeXt+LoRA on MPS"]
+    bot["single Discord bot<br/>(drains announce.jsonl)"]
+    disk[("~/mountain/<br/>data · checkpoints · live")]
   end
 
-  subgraph cf["Cloudflare"]
-    worker["mountain-inference Worker<br/>(cron: */15)"]
-    container["InferenceContainer<br/>(FastAPI, sleeps 5min)"]
-    r2priv[("R2: is-the-mountain-out<br/>private — captures, labels,<br/>checkpoint")]
-    r2pub[("R2: is-the-mountain-out-public<br/>state.json + history.jsonl")]
-    site["is-the-mountain-out Worker<br/>(SPA static assets + /state.json)"]
+  subgraph air["MacBook Air (M4) — on demand"]
+    trainer["training batch<br/>(MPS)"]
+    airdisk[("~/mountain/<br/>data · checkpoints")]
   end
 
-  webcam(["UW ATG webcam"]) --> collector
+  subgraph gh["GitHub"]
+    wf["publish.yml<br/>self-hosted macOS runner"]
+    pages[["GitHub Pages<br/>mountainisout.robogeosociety.xyz"]]
+  end
+
+  webcam(["KING 5 Queen Anne cam"]) --> collector
   metar(["NOAA METAR (KSEA)"]) --> collector
-  collector -- "captures + metar" --> r2priv
+  webcam --> infer
+  metar --> infer
 
-  worker -- "visibility change: frame + seeded 👍⛅👎 (as the bot)" --> discord(["Discord channel"])
-  worker -- "announced frame + metar" --> r2priv
-  discord -- "reactions" --> labeler
-  labeler -- "👍⛅👎 labels" --> r2priv
+  tick --> collector
+  tick --> infer
+  collector -- "captures + metar" --> disk
+  disk -- "checkpoint" --> infer
+  infer -- "state.json · history.jsonl · announce.jsonl" --> disk
 
-  r2priv -- "labels + cached images" --> trainer
-  trainer -- "checkpoint" --> r2priv
+  tick -- "gh workflow run publish.yml" --> wf
+  disk -- "live/state.json + history.jsonl" --> wf
+  wf -- "web/dist + CNAME" --> pages
+  browser(["Browser"]) -- "GET ./state.json (60s poll)" --> pages
 
-  worker -- "POST /predict" --> container
-  webcam --> container
-  metar --> container
-  r2priv -- "checkpoint (cold start only)" --> container
-  container -- "PredictionState" --> worker
-  worker -- "state.json + history.jsonl" --> r2pub
+  disk -- "announce.jsonl" --> bot
+  bot -- "frame + 👍⛅👎" --> discord(["Discord channel"])
+  discord -- "reactions" --> bot
+  bot -- "labels.yaml" --> disk
 
-  browser(["Browser"]) -- "GET / and /state.json (60s poll)" --> site
-  site -- "get(state.json) via R2 binding" --> r2pub
+  disk -- "air/pull-labels.sh<br/>labels + referenced frames" --> airdisk
+  airdisk --> trainer
+  trainer -- "checkpoint + era.json" --> airdisk
+  airdisk -- "air/push-checkpoint.sh<br/>rsync + launchctl kickstart" --> disk
+  disk -- "checkpoint" --> infer
 ```
+
+Both rsyncs go over the LAN to `tommys-mac-mini.local`. Never the tailnet —
+the scripts refuse a `*.ts.net` host.
 
 ### Inference tick (every 15 min)
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant Cron as CF Cron
-  participant W as Worker
-  participant C as Container
-  participant Cam as UW webcam
+  participant L as launchd (daemon)
+  participant T as mini/tick.sh
+  participant D as ~/mountain
+  participant Cam as Queen Anne cam
   participant M as NOAA METAR
-  participant R2p as R2 (private)
-  participant R2u as R2 (public)
-  participant D as Discord
+  participant A as GitHub Actions
+  participant P as GitHub Pages
 
-  Cron->>W: scheduled() fires
-  W->>C: POST /predict (DO binding)
-  alt cold start
-    C->>R2p: GET checkpoints/{adapter,classifier}.*
-    R2p-->>C: weights
+  L->>T: StartInterval 900 fires
+    T->>Cam: collect capture-once
+    T->>M: METAR (KSEA)
+    T->>D: write capture + metar (raw, uncropped)
+    alt same bytes 3 ticks running
+      T->>D: state.json status="stale" — no prediction
+    else fresh frame
+      T->>T: crop burn-in strip, predict_state.py (MPS, local checkpoint)
+      T->>D: state.json (atomic) + history.jsonl
+    end
+    opt change confirmed on 2 ticks, or model unsure
+      T->>D: append announce.jsonl (bot posts it later)
+    end
+    T->>A: gh workflow run publish.yml
+    A->>D: read live/state.json + history.jsonl
+    A->>P: build web/ + deploy-pages (CNAME in the artifact)
+    Note over P: SPA picks it up on the next 60s poll
   end
-  C->>Cam: GET webcam.jpg
-  C->>M: GET KSEA.TXT
-  C->>C: model.predict()
-  C-->>W: PredictionState (class, confidence, weather)
-  W->>R2u: PUT state.json
-  opt visibility changed, confirmed on 2 consecutive ticks
-    W->>R2p: PUT announced frame + metar
-    W->>D: POST embed as the labeler bot + seed 👍⛅👎
-  end
-  W->>R2u: PUT history.jsonl (GET + append + PUT)
-  Note over W,R2u: SPA picks up next 60s poll
 ```
 
-### Training cycle (on demand)
+### Training cycle (on demand, on the Air)
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant Op as Operator
-  participant T as training batch
-  participant R2p as R2 (private)
-  participant Mac as Mac (MPS)
+  participant Op as Operator (Air)
+  participant P as air/pull-labels.sh
+  participant M as Mac mini (.local)
+  participant T as training batch (MPS)
+  participant S as air/push-checkpoint.sh
 
-  Op->>T: uv run training batch --labels data/labels.yaml
-  T->>R2p: list_keys + prefetch images/metar
-  Note over T,R2p: .r2cache/ skips R2 fetch when warm
-  T->>Mac: load checkpoint (local or R2)
+  Op->>P: just pull-labels
+  P->>M: rsync labels.yaml + labels/
+  P->>M: rsync only the captures those labels name (+ METAR)
+  Op->>T: just train
   loop epochs
-    T->>Mac: forward + backward (MPS)
+    T->>T: forward + backward on MPS, best val loss wins
   end
-  T->>R2p: PUT checkpoints/* (best val_loss)
-  Note over R2p: Next container cold start picks it up.<br/>No image rebuild needed.
+  T->>T: write checkpoints/* + era.json (the live camera's era)
+  Op->>S: just push-checkpoint
+  S->>S: refuse if era.json ≠ [webcam] era
+  S->>M: rsync checkpoint (old one kept in .previous)
+  S->>M: sudo launchctl kickstart system/…mountain-tick
+  Note over M: next tick loads it — status flips unvalidated → ok.<br/>No image, no upload, no restart.
 ```
 
 ## Current model state
 
-Snapshot of the checkpoint currently live in R2 at `checkpoints/`:
+**Nothing is trained on the live camera yet, and the site says so** —
+`status: "unvalidated"`, rendered as CHECKING…, until a Queen Anne checkpoint
+exists. The table below describes the last UW-era checkpoint, which still sits
+in `/Users/tommydoerr/mountain/checkpoints/` on the mini (it was R2
+`checkpoints/` until 2026-09) but is **no longer loaded**: the era gate refuses it. It is a record
+of what was, not a claim about what the site is saying.
 
 | Field | Value |
 |---|---|
@@ -165,7 +226,7 @@ Snapshot of the checkpoint currently live in R2 at `checkpoints/`:
 | Head input | 768-dim image features ⊕ 2-dim weather (visibility, ceiling) |
 | Classes | 0 = Not Out, 1 = Full, 2 = Partial |
 | Capture window | 2026-02-22 → 2026-04-24 (55 days) |
-| Captures in R2 | 2,057 jpgs + matching METAR |
+| Captures archived on the mini | 2,057 jpgs + matching METAR |
 | Labeled dataset | 2,000 (1,727 Not Out / 109 Full / 164 Partial) |
 | Best val loss | 0.0782 |
 | Val accuracy | 97.6% (15% stratified held-out, single-epoch run) |
@@ -189,17 +250,17 @@ Targets the model is trying to meet before announcing "out" with confidence:
 ## Repository layout
 
 ```
-mountain.toml         configuration (mountain, webcam, METAR, training, R2 storage, bot)
-collect/              capture collector (Nomad job), R2 storage backend, classifier server
-bot/                  Discord reaction-labeling bot (see BOT.md)
+mountain.toml         configuration (mountain, webcam, METAR, training, paths, mini, storage, bot)
+mini/                 the serving runtime: tick.sh, launchd/ daemon plist, install.sh, r2-pull.sh
+air/                  the training side: pull-labels.sh, push-checkpoint.sh, _config.sh
+collect/              capture collector + storage backends + classifier server
+bot/                  Discord reaction labeling (see BOT.md) + transition.py (what the channel says)
 train/                model definition, scheduler, config loader, checkpoints
-tools/                labeling backend, evaluation/pruning/ab-test scripts, predict_state
-inference/            FastAPI server + Dockerfile for the Cloudflare Container
-worker/               Cloudflare Worker source (TypeScript) + wrangler.toml
-web/                  Public SPA (Vite + React) + the Worker that serves it (worker/, wrangler.toml)
+tools/                predict_state (the inference entry point), labeling backend, eval scripts
+web/                  Public SPA (Vite + React), deployed to GitHub Pages
 ui/                   Internal classifier UI for bulk labeling (Vite + React)
-.github/workflows/    CI — ruff, pytest, worker + web checks, and both Cloudflare deploys
-scripts/              deploy-worker.sh — break-glass manual Worker redeploy
+.github/workflows/    CI — ruff, pytest, web checks — and publish.yml (Pages)
+scripts/              scheduled-train.sh
 ```
 
 ## Commands
@@ -207,12 +268,19 @@ scripts/              deploy-worker.sh — break-glass manual Worker redeploy
 Run from the repo root.
 
 ```bash
+# The whole production tick, by hand (what launchd runs every 15 min)
+just tick                     # capture + inference + publish
+just tick-local               # …without dispatching the Pages deploy
+
 # Capture
-uv run collect collect        # one capture (webcam + METAR) → local + R2 if [storage] enabled
+uv run collect capture-once   # one headless capture (webcam + METAR), prints the key
 uv run collect live           # continuous capture loop
 
-# Training (reads from R2, writes checkpoint back to R2)
-uv run training batch --labels data/labels.yaml --epochs N
+# Training — on the Air only; the mini is 8 GB and never trains (TRAINING.md)
+just pull-labels              # rsync the mini's labels + the frames they name
+just train                    # training batch on MPS, 5 epochs, era.json stamped
+just push-checkpoint          # rsync back + kickstart the tick, with an era check
+uv run training batch --labels ~/mountain/data/labels.yaml --epochs N
 uv run training live          # continuous live capture + gradient accumulation
 uv run training once          # single capture + train cycle, then exit
 
@@ -224,85 +292,112 @@ uv run classify stop
 uv run --group bot bot run          # reaction labeling + startup sweep
 uv run --group bot bot post-once    # post one labelable capture, then exit
 
-# Inference (server-side, used by the Cloudflare Container)
-uv run python tools/predict_state.py --config mountain.toml
+# Inference (native; MPS where available, CPU otherwise)
+uv run python tools/predict_state.py --config mountain.toml \
+    --out ~/mountain/live/state.json \
+    --log ~/mountain/live/history.jsonl \
+    --checkpoint-dir ~/mountain/checkpoints
 
-# Cloudflare Worker tests (also run on every PR by .github/workflows/worker-ci.yml)
-cd worker && npm ci && npm test && npm run typecheck
-
-# Public SPA: dev server (proxies /state.json to R2), lint + typecheck + build (web-ci.yml)
+# Public SPA: dev server, lint + typecheck + build (web-ci.yml)
 cd web && npm ci && npm run dev
 cd web && npm run lint && npm run build
 ```
 
 ## Deploying
 
-Two Workers, both deployed from CI on a push to `main`, each inside its own GitHub
-environment so the [Environments page](https://github.com/robogeosociety/is-the-mountain-out/deployments)
-records what is actually live:
+There is one deploy, and it is the site: **`.github/workflows/publish.yml`** →
+GitHub Pages.
 
-| Worker | Source | Workflow | Trigger paths | Environment |
-|---|---|---|---|---|
-| `mountain-inference` (cron + container) | `worker/` | `deploy-worker.yml` | `worker/**` | `production` |
-| `is-the-mountain-out` (the site) | `web/` | `deploy-web.yml` | `web/**` | `production-web` |
+| What | Where it runs | Trigger |
+|---|---|---|
+| capture + inference | Mac mini, `mini/tick.sh` under a system LaunchDaemon | `StartInterval 900` |
+| publish | `publish.yml` on the self-hosted `[self-hosted, macOS, fleet]` runner | `gh workflow run publish.yml` from the tick, plus a `*/15` schedule as backstop |
+| model | the Air, `just train` → `just push-checkpoint` | on demand; the next tick serves it |
 
-Each workflow first runs the same checks that gate PRs (`worker-ci.yml` /
-`web-ci.yml`), then `wrangler deploy`. Redeploy the current `main` by hand with:
+The workflow builds `web/`, copies `state.json` + `history.jsonl` out of
+`/Users/tommydoerr/mountain/live` (which is why it must run on the mini's runner),
+writes a `CNAME` for `mountainisout.robogeosociety.xyz` into the artifact, and
+ships it with `actions/upload-pages-artifact` + `actions/deploy-pages`. No
+commit churn: nothing is pushed to a branch.
 
 ```bash
-gh workflow run deploy-worker.yml   # inference Worker
-gh workflow run deploy-web.yml      # the site
+gh workflow run publish.yml     # republish whatever is on the dev disk now
+just publish                    # the same thing
 ```
 
-CI authenticates with the repo secret `CLOUDFLARE_API_TOKEN` (see `CLAUDE.md` →
-Deployment (Cloudflare) for the required token scope). Without it the deploy job
-fails at its preflight step with an explicit message and deploys nothing.
+Installing or reinstalling the tick on the mini — **at the console, as
+`tommydoerr`, not under `sudo`** (the script sudo's the three steps that need
+root, and a dropped ssh session between its `bootout` and `bootstrap` leaves
+the tick unloaded):
 
-`scripts/deploy-worker.sh` is the **break-glass** path for the inference Worker —
-for when Actions is down, the token is expired, or an uncommitted tree must ship.
-It uses your own `wrangler login` session and warns before it runs. The site's
-equivalent is simply `cd web && npm run deploy`.
+```bash
+bash mini/install.sh            # → /Library/LaunchDaemons + /usr/local/libexec
+sudo launchctl kickstart -p system/com.robogeosociety.mountain-tick
+```
+
+It survives `sudo fdesetup authrestart` with nobody logged in — which is the
+whole reason it is a daemon. `mini/README.md` has the verification and the one
+sudoers line the unattended reboot needs.
+
+There are no Cloudflare credentials in this repo and no `wrangler` anywhere in
+the tree. `CLOUDFLARE_API_TOKEN` and the `production` / `production-web`
+environments are dead and can be deleted.
 
 ## Configuration
 
 Single source of truth: `mountain.toml`.
 
-- `[mountain]`, `[webcam]`, `[weather]` — target mountain + data sources
-- `[training]` — schedule, gradient accumulation, LoRA hyperparams
+- `[mountain]`, `[webcam]`, `[weather]` — target mountain + data sources.
+  `[webcam] crop_bottom_px` drops the station's burn-in clock strip before
+  inference (`collect/frame.py`); `stale_after_repeats` is how many
+  byte-identical frames in a row mean the feed is dead
+  (`collect/freshness.py`) — at which point `state.json` carries
+  `status: "stale"` and **no prediction** rather than reading a frozen picture.
+  `[webcam] era` is the camera identity the era gate keys on
+- `[training]` — schedule, gradient accumulation, LoRA hyperparams, and
+  `checkpoint_era`: the era assumed for a checkpoint with no `era.json` beside
+  it (everything trained before 2026-09-24 is `uw-atg` by definition)
 - `[collection]` — capture cadence
-- `[storage]` — R2 backend (`backend = "r2"`, account/bucket/cache_dir)
+- `[paths]` — the **local** training tree on whichever machine runs `just
+  train` (`captures_dir`, `labels_dir`, `checkpoint_dir`); `~` is expanded
+- `[mini]` — the always-on host the Air pulls labels from and pushes
+  checkpoints to: `host` (always `.local`, never the tailnet), `root`, and the
+  daemon `tick_label` to kickstart. The `air/` scripts read both sections
+  through `ConfigLoader`, so the shell and the trainer cannot disagree about
+  where the labels are
+- `[storage]` — `backend = "local"`; the mini's boot volume is the store
+- `[bot]` — sweep window, state URL, announce-queue path (follows `[mini] root`)
 
-Worker-side policy lives in `worker/wrangler.toml` `[vars]`, so thresholds move
-without a code change:
+What the channel says is no longer Worker `[vars]`; it is the two flags on the
+inference command, defaulted in `bot/transition.py`:
 
-- `ALERT_MIN_CONFIDENCE`, `LABEL_COOLDOWN_HOURS` — what the channel says about the
-  mountain (see `worker/src/transition.ts`)
-- `HEALTH_ALERT_AFTER_FAILURES`, `HEALTH_REALERT_HOURS` — when the channel says the
-  *pipeline* is broken (see `worker/src/health.ts`)
+- `--alert-min-confidence` (0.85) — binary confidence at or above which a
+  confirmed change is announced
+- `--label-cooldown-hours` (4) — minimum gap between "I'm unsure, which is it?"
+  label requests
 
-R2 S3 credentials (`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) live in `cf.env` (gitignored). The Worker holds the same values as secrets so the container can pull its checkpoint from R2 on startup.
+`cf.env` (gitignored) is now only the Discord bot's credentials —
+`DISCORD_BOT_TOKEN`, `DISCORD_CHANNEL_ID`, `DISCORD_ALLOWED_USER_IDS`. The R2
+keys in it are only needed for the one-shot `mini/r2-pull.sh`.
 
 ## What runs where
 
 | Component | Host | Trigger |
 |---|---|---|
-| Capture collector | Mac mini (Nomad) | Cron, on-demand |
-| Discord labeling bot | Mac mini (Nomad) | Always-on (harvests reactions; the Worker does the posting) |
-| Training | Mac mini (MPS) | On-demand (`uv run training batch`) |
-| Inference cron | Cloudflare Worker | `*/15 * * * *` |
-| Inference compute | Cloudflare Container | Worker invocation |
-| Storage | Cloudflare R2 | (always) |
-| Public SPA | Cloudflare Worker `is-the-mountain-out` (static assets) | Push to main touching `web/**`, or `gh workflow run deploy-web.yml` |
-| Container image | GHCR | Built by GH Actions on push to main |
-| Worker deploy | GitHub Actions | Push to main touching `worker/**`, or `gh workflow run deploy-worker.yml` |
+| Capture + inference | Mac mini, **system LaunchDaemon**, native MPS | every 900s, `mini/tick.sh` |
+| Live state + captures + served checkpoint | `/Users/tommydoerr/mountain/` on the mini's boot volume (restic to R2 nightly) | (always) |
+| Discord alerts + labels | Mac mini, single Discord bot draining `announce.jsonl` | on a queued announcement |
+| **Training** | **MacBook Air (M4), MPS — never the mini** | on demand: `just pull-labels` → `just train` → `just push-checkpoint` |
+| Public SPA | GitHub Pages | `publish.yml` |
+| CI (ruff, pytest, web build) | GitHub-hosted runners | PRs and pushes to main |
 
-GitHub hosts the source repo, the container image registry, and both deploy
-pipelines; nothing user-facing runs there. The site and prediction both run on
-Cloudflare, and if Actions is down either Worker can still be shipped by hand
-(`scripts/deploy-worker.sh`, `cd web && npm run deploy`). The 2026-05-25 migration
-claimed this and did not deliver it — the Cloudflare Pages project it described was
-never created and GitHub Pages served a frozen build until 2026-09-02; see the
-post-mortem above.
+GitHub hosts the source, the CI, and the site. The mini owns the live state and
+runs everything that has to be awake at 3 a.m.; the Air owns the model and runs
+the one workload an 8 GB machine should not. Nothing in the live path bills by
+the request, and the failure modes are honest: a mini that is asleep or wedged
+skips ticks (the site goes stale and says so), a GitHub outage delays
+publishing but not prediction, and an Air that is shut is simply a week without
+a retrain.
 
 ## Network access (Mac mini)
 
@@ -315,6 +410,11 @@ The internal labeling UI is exposed over the LAN and Tailscale:
 - [uv](https://github.com/astral-sh/uv) for Python deps; Mac with Apple Silicon for MPS.
 - Node.js 20+ for the SPA and the internal classifier UI.
 - `uv venv && uv pip install -e .` once at the top of the repo.
-- `cp cf.env.example cf.env` and fill in R2 credentials (see `CLAUDE.md` for details).
+- For the Discord bot only: create `cf.env` (gitignored) with `DISCORD_BOT_TOKEN`,
+  `DISCORD_CHANNEL_ID` and optionally `DISCORD_ALLOWED_USER_IDS` — see `BOT.md`.
+- On the mini: `bash mini/r2-pull.sh` once, then `bash mini/install.sh` at the
+  console. See `mini/README.md`.
+- On the Air (training only): an ssh key on the mini and `rsync` on `PATH`.
+  `just pull-labels` sets the rest up itself. See `TRAINING.md`.
 
 See `CLAUDE.md` for in-repo conventions (data layout, Vite port registry, etc.).

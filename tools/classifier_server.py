@@ -1,6 +1,5 @@
 import os
 import logging
-import requests
 import yaml
 from pathlib import Path
 from typing import Dict
@@ -82,15 +81,13 @@ def save_labels(labels):
 
 @app.get("/api/jobs")
 def get_jobs():
-    """Proxy Nomad jobs for the UI."""
-    try:
-        nomad_url = os.environ.get("NOMAD_ADDR", "http://127.0.0.1:4646")
-        response = requests.get(f"{nomad_url}/v1/jobs", timeout=2)
-        response.raise_for_status()
-        return response.json()
-    except Exception:
-        # Fallback if Nomad is unreachable
-        return []
+    """Always empty since Nomad was retired (2026-09).
+
+    Kept as an endpoint, not deleted, because ui/ still polls it; returning []
+    is the same thing it saw whenever Nomad was unreachable. Collection now
+    runs from a LaunchAgent on the mini (mini/), which has no job API.
+    """
+    return []
 
 
 @app.get("/api/images")

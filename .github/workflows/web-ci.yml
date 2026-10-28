@@ -1,13 +1,14 @@
-# Web CI — the PR gate for web/ (the public SPA + its static-assets Worker).
+# Web CI — the PR gate for web/ (the public SPA).
 #
-# Mirrors worker-ci.yml: lint, then `npm run build`, which runs `tsc -b` over
-# the app, the vite config, and web/worker/index.ts before vite bundles. Not
-# path-filtered, for the same reason worker-ci.yml is not — a job that never
-# starts shows as "pending" forever once required. It takes about a minute.
+# Lint, then `npm run build`, which runs `tsc -b` over the app and the vite
+# config before vite bundles. Deliberately NOT path-filtered: a path-filtered
+# job that never starts shows as "pending" forever once it is a required check.
+# It takes about a minute.
 #
-# Exposed as `workflow_call` so deploy-web.yml gates the production deploy on
-# exactly these checks. No push:main trigger here on purpose: the deploy
-# workflow calls this one, so main gets the checks without a duplicate run.
+# publish.yml does its own build on the self-hosted runner rather than calling
+# this one — that job needs the dev disk, which a GitHub-hosted runner cannot
+# see, so there is nothing to share. `workflow_call` is kept so it can still be
+# invoked from elsewhere.
 name: Web CI
 
 on:
@@ -44,6 +45,7 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      # `tsc -b && vite build` — the typecheck is part of the build.
+      # `tsc -b && vite build` — the typecheck is part of the build. This is the
+      # same build publish.yml runs; only the state.json staging differs.
       - name: Build
         run: npm run build

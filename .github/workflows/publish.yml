@@ -1,0 +1,143 @@
+# Publish the site to GitHub Pages — the SPA plus the two live files the Mac
+# mini just wrote.
+#
+# This replaced deploy-web.yml (wrangler → Cloudflare Worker) in 2026-09, when
+# inference moved back onto the mini. The build is ordinary; the interesting
+# part is where `state.json` comes from: NOT from the repo, and not from R2,
+# but from the tick's live directory on the runner host itself,
+# /Users/tommydoerr/mountain/live. That is why this job pins
+# `runs-on: [self-hosted, macOS, fleet]` — it is the only runner that can see
+# that directory. Override with the MOUNTAIN_LIVE repo variable if the path
+# moves; the runner and the tick must agree.
+#
+# Everything the mountain needs is on the mini's BOOT volume since 2026-09-27:
+# the live files above, and the tick's own checkout at
+# /Users/tommydoerr/src/is-the-mountain-out (MOUNTAIN_REPO). This workflow
+# checks the repo out fresh into the runner's workspace and does not read that
+# copy — but they are the same commit, and a runner pointed at a wedged
+# external disk was how the site used to go quiet.
+#
+# Triggered two ways:
+#   * workflow_dispatch — `gh workflow run publish.yml`, fired by mini/tick.sh
+#     at the end of each 15-minute tick. This is the normal path; the site
+#     updates within a minute of a new prediction.
+#   * schedule */15 — the backstop for when the tick could not dispatch (gh
+#     logged out, network blip). It republishes whatever is on the disk.
+#
+# Four deploys an hour is comfortably inside the Pages limits.
+name: Publish
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Backstop only — mini/tick.sh dispatches this directly. GitHub's scheduler
+    # is best-effort and drifts under load, which is exactly why it is not the
+    # primary trigger.
+    - cron: '*/15 * * * *'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# `pages` is the conventional group name: one deployment in flight at a time,
+# and a queued run is superseded rather than stacked. cancel-in-progress is
+# false so a deploy mid-upload is never torn in half; the next tick is only 15
+# minutes out anyway.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: [self-hosted, macOS, fleet]
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      # Where the mini's tick writes. Overridable with a repo variable so a
+      # second host (or a test) can point somewhere else.
+      MOUNTAIN_LIVE: ${{ vars.MOUNTAIN_LIVE || '/Users/tommydoerr/mountain/live' }}
+      CUSTOM_DOMAIN: ${{ vars.MOUNTAIN_DOMAIN || 'mountainisout.robogeosociety.xyz' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Build SPA
+        working-directory: web
+        run: npm run build
+
+      # MOUNTAIN_LIVE is a repo variable, so it can be pointed at a network or
+      # external volume by someone who is not thinking about access(2) hanging
+      # forever. A bounded probe keeps that from holding a runner slot for six
+      # hours. (mini/tick.sh dropped its equivalent when the last path it
+      # touched moved onto the boot volume; this one guards a value CI does not
+      # control.)
+      - name: Probe the live directory
+        run: |
+          ( ls "$MOUNTAIN_LIVE" >/dev/null 2>&1 ) & probe=$!
+          waited=0
+          while kill -0 "$probe" 2>/dev/null; do
+            if [ "$waited" -ge 20 ]; then
+              kill -9 "$probe" 2>/dev/null || true
+              echo "::error title=Live directory unreachable::$MOUNTAIN_LIVE did not answer within 5s (wedged disk?). Nothing was published."
+              exit 1
+            fi
+            sleep 0.25
+            waited=$((waited + 1))
+          done
+          wait "$probe"
+
+      # A build with no state.json deploys a site that says "CHECKING…" forever,
+      # which looks like a front-end bug and is not one. Fail loudly instead.
+      - name: Stage live state
+        run: |
+          set -euo pipefail
+          if [ ! -f "$MOUNTAIN_LIVE/state.json" ]; then
+            echo "::error title=No state.json::$MOUNTAIN_LIVE/state.json is missing. Has mini/tick.sh run? Nothing was published."
+            exit 1
+          fi
+          python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$MOUNTAIN_LIVE/state.json" \
+            || { echo "::error title=Corrupt state.json::Not valid JSON; refusing to publish."; exit 1; }
+
+          cp "$MOUNTAIN_LIVE/state.json" web/dist/state.json
+          # history.jsonl is the debug/backfill feed; the SPA works without it.
+          if [ -f "$MOUNTAIN_LIVE/history.jsonl" ]; then
+            # Ship a bounded tail: the full log grows without limit and the
+            # artifact is rebuilt every 15 minutes.
+            tail -n "${HISTORY_LINES:-2000}" "$MOUNTAIN_LIVE/history.jsonl" > web/dist/history.jsonl
+          else
+            : > web/dist/history.jsonl
+          fi
+
+          # The custom domain lives in the artifact, not in a branch — there is
+          # no gh-pages branch for the Pages UI to keep a CNAME file on.
+          printf '%s\n' "$CUSTOM_DOMAIN" > web/dist/CNAME
+          # Pages is not Jekyll here; without this, any _underscore asset 404s.
+          touch web/dist/.nojekyll
+
+          {
+            echo "### Publishing"
+            echo
+            echo '```json'
+            cat web/dist/state.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -11,12 +11,22 @@ interface Weather {
 
 interface State {
   timestamp_utc: string | null
+  // "ok" = a real prediction. "stale" = the camera has been returning the same
+  // bytes for several ticks, so the mini deliberately published no prediction
+  // rather than one from a frozen frame. "unvalidated" = there is no
+  // checkpoint trained on the current camera, so no prediction was computed at
+  // all. Optional: older files predate the field.
+  status?: 'ok' | 'stale' | 'unvalidated'
+  stale_since?: string | null
+  camera_era?: string | null
+  checkpoint_era?: string | null
   class_index: 0 | 1 | 2 | null
   class_name: ClassName | null
   is_out: boolean | null
   confidence: Record<ClassName, number> | null
   weather: Weather | null
   webcam_url: string
+  frame_sha256?: string | null
   model_version: string | null
 }
 
@@ -28,7 +38,7 @@ interface Presentation {
   accent: string
 }
 
-const PRESENTATION: Record<ClassName | 'unknown', Presentation> = {
+const PRESENTATION: Record<ClassName | 'unknown' | 'frozen', Presentation> = {
   full: {
     headline: 'YES.',
     sub: "She's out.",
@@ -57,12 +67,23 @@ const PRESENTATION: Record<ClassName | 'unknown', Presentation> = {
     fg: 'text-slate-200',
     accent: 'text-slate-400',
   },
+  frozen: {
+    headline: 'NO IDEA.',
+    sub: 'The camera stopped sending pictures.',
+    bg: 'bg-slate-900',
+    fg: 'text-slate-200',
+    accent: 'text-amber-300',
+  },
 }
 
 const STALE_MS = 60 * 60 * 1000
-// Same-origin: the Worker in ../worker/index.ts serves it from R2, and
-// `vite dev` proxies it (vite.config.ts). No cross-origin fetch, no CORS.
-const STATE_URL = '/state.json'
+// Relative to the deployed base path, not the domain root. The publish
+// workflow copies state.json in beside index.html, so the site is correct both
+// on the custom domain (mountainisout.robogeosociety.xyz/) and on the project
+// Pages fallback (robogeosociety.github.io/is-the-mountain-out/). It used to be
+// an absolute '/state.json' answered by a Cloudflare Worker from R2; that whole
+// path is gone.
+const STATE_URL = `${import.meta.env.BASE_URL}state.json`
 
 function formatRelative(iso: string | null, now: number): string {
   if (!iso) return 'never'
@@ -112,7 +133,20 @@ function App() {
   const className = state?.class_name ?? null
   const timestamp = state?.timestamp_utc ?? null
   const stale = timestamp ? now - Date.parse(timestamp) > STALE_MS : false
-  const key: ClassName | 'unknown' = className && !stale ? className : 'unknown'
+  // A frozen feed is a different failure from a stale file: the mini IS
+  // publishing, on time, and is telling us the camera is dead. Say that,
+  // rather than implying the site itself is broken.
+  const frozen = state?.status === 'stale'
+  // No model for this camera yet. CHECKING... is the truthful face of that:
+  // the pipeline is healthy and collecting labels, it just cannot answer.
+  const unvalidated = state?.status === 'unvalidated'
+  const key: ClassName | 'unknown' | 'frozen' = frozen
+    ? 'frozen'
+    : unvalidated
+    ? 'unknown'
+    : className && !stale
+    ? className
+    : 'unknown'
   const look = PRESENTATION[key]
 
   return (
@@ -126,7 +160,14 @@ function App() {
         </h1>
         <p className="mt-4 text-2xl sm:text-3xl font-medium opacity-90">{look.sub}</p>
         <p className={`mt-10 text-sm uppercase tracking-widest ${look.accent}`}>
-          {stale && timestamp
+          {frozen
+            ? `camera feed frozen — last new frame ${formatRelative(
+                state?.stale_since ?? timestamp,
+                now
+              )}`
+            : unvalidated
+            ? 'training — no checkpoint for this camera yet'
+            : stale && timestamp
             ? `stale — last checked ${formatRelative(timestamp, now)}`
             : timestamp
             ? `checked ${formatRelative(timestamp, now)}`
@@ -174,6 +215,20 @@ function DebugPanel({ state }: { state: State }) {
           <div>{weather?.visibility_sm != null ? `${weather.visibility_sm} SM` : '—'}</div>
           <div className="opacity-60">ceiling</div>
           <div>{weather?.ceiling_ft != null ? `${weather.ceiling_ft} ft` : 'none'}</div>
+          <div className="opacity-60">status</div>
+          <div>
+            {state.status === 'unvalidated'
+              ? 'no checkpoint for this camera yet'
+              : state.status ?? 'ok'}
+          </div>
+          <div className="opacity-60">era</div>
+          <div>
+            {state.camera_era
+              ? `${state.camera_era} ← ${state.checkpoint_era ?? 'untagged'}`
+              : '—'}
+          </div>
+          <div className="opacity-60">frame</div>
+          <div>{state.frame_sha256?.slice(0, 12) ?? '—'}</div>
           <div className="opacity-60">model</div>
           <div>{state.model_version ?? '—'}</div>
           <div className="opacity-60">timestamp</div>
